@@ -1,0 +1,19 @@
+# Secrets
+.env
+env.py
+
+# Session / runtime artifacts
+storage_state.json
+results.csv
+_debug/
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+
+# VS Code
+.vscode/
