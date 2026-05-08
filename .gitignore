@@ -5,6 +5,7 @@ env.py
 # Session / runtime artifacts
 storage_state.json
 results.csv
+vins.txt
 _debug/
 
 # Local docs
