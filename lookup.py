@@ -47,7 +47,7 @@ import os
 import re
 import shutil
 import sys
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -624,8 +624,7 @@ PAINT_CODE_PATTERNS = [
     # BMW/MINI: "Color\nSTERLINGGRAU (472)" — code in parens after the
     # colour name. Label is just "Color" / "Colour" / "Farbe" with no
     # trailing "Code". The colour-name run may include letters, digits,
-    # spaces, hyphens and slashes (e.g. "BLACK SAPPHIRE METALLIC",
-    # "MINERAL GREY METALLIC").
+    # spaces, hyphens and slashes (e.g. "BLACK SAPPHIRE METALLIC").
     re.compile(
         r"(?:Exterior\s*)?(?:Colou?r|Farbe)\s*[:\n]\s*"
         r"[A-Z0-9][A-Z0-9 \-/]*?"
@@ -638,11 +637,15 @@ PAINT_CODE_PATTERNS = [
     re.compile(r"Lackcode\s*[:\n]\s*([A-Z0-9]{2,8})", re.I),
 ]
 
-EXTRA_FIELD_PATTERNS = {
-    "model":           re.compile(r"^Model\s*\n\s*(.+?)\s*$", re.I | re.M),
-    "production_date": re.compile(r"Date of production\s*\n\s*(\d{2}\.\d{2}\.\d{4})", re.I),
-    "engine_code":     re.compile(r"Engine Code\s*\n\s*([A-Z0-9]+)", re.I),
-}
+# Captures the human-readable colour name where the page provides one
+# (BMW/MINI format). VW/Audi don't include a colour name in this block,
+# so this extractor returns "" for those.
+PAINT_DESCRIPTION_PATTERN = re.compile(
+    r"(?:Exterior\s*)?(?:Colou?r|Farbe)\s*[:\n]\s*"
+    r"([A-Z0-9][A-Z0-9 \-/]*?)"            # the colour name
+    r"\s*\(\s*[A-Z0-9]{2,8}\s*\)",          # immediately followed by (code)
+    re.I,
+)
 
 VEHICLE_DATA_NEEDLE = re.compile(
     # Catch:
@@ -701,13 +704,14 @@ def extract_paint_code(text: str) -> str:
     return ""
 
 
-def extract_extras(text: str) -> dict[str, str]:
-    out = {}
-    for key, pat in EXTRA_FIELD_PATTERNS.items():
-        m = pat.search(text)
-        if m:
-            out[key] = m.group(1).strip()
-    return out
+def extract_paint_description(text: str) -> str:
+    """Extract the human-readable colour name (e.g. "STERLINGGRAU") and
+    return it Title Cased ("Sterlinggrau"). Returns "" if no description
+    is on the page (e.g. VW/Audi don't include one in the paint row)."""
+    m = PAINT_DESCRIPTION_PATTERN.search(text)
+    if not m:
+        return ""
+    return m.group(1).strip().title()
 
 
 def vin_error_in_text(text: str) -> str | None:
@@ -724,22 +728,15 @@ def vin_error_in_text(text: str) -> str | None:
 class LookupResult:
     timestamp: str
     vin: str
-    make: str = ""
-    category: str = ""
-    year: str = ""
-    brand: str = ""
     paint_code: str = ""
-    model: str = ""
-    production_date: str = ""
-    engine_code: str = ""
+    paint_description: str = ""
     via: str = ""       # "catalog", "dashboard", or "" on failure
     error: str = ""
 
 
 def _populate_from_text(result: LookupResult, text: str) -> None:
     result.paint_code = extract_paint_code(text)
-    for k, v in extract_extras(text).items():
-        setattr(result, k, v)
+    result.paint_description = extract_paint_description(text)
 
 
 def _try_catalog(page: Page, vin: str, brand: str, result: LookupResult,
@@ -830,16 +827,12 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
     result = LookupResult(
         timestamp=datetime.now().isoformat(timespec="seconds"),
         vin=row.vin,
-        make=row.make or "",
-        category=row.category or "",
-        year=row.year or "",
     )
 
     brand, explanation = resolve_brand(row.make, row.category)
     catalog_error: str | None = None
 
     if brand and brand in BRAND_CATALOG_SERVICE:
-        result.brand = brand
         log(f"looking up {row.vin}  {explanation}")
         ok, err = _try_catalog(page, row.vin, brand, result, debug)
         if ok:
@@ -853,7 +846,6 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
         if not brand:
             catalog_error = explanation  # "no make supplied" / "unknown make ..."
         else:
-            result.brand = brand
             catalog_error = f"no catalog URL configured for {brand}"
         log(catalog_error)
 
@@ -864,9 +856,7 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
     log(f"trying dashboard fallback for {row.vin}")
     # Wipe any partial extracts from the catalog attempt.
     result.paint_code = ""
-    result.model = ""
-    result.production_date = ""
-    result.engine_code = ""
+    result.paint_description = ""
 
     ok, err = _try_dashboard(page, row.vin, result, debug)
     if ok:
@@ -891,14 +881,12 @@ def lookup_vin_with_retry(page: Page, row: LookupRow, debug: bool,
         except PlaywrightTimeoutError as e:
             r = LookupResult(
                 timestamp=datetime.now().isoformat(timespec="seconds"),
-                vin=row.vin, make=row.make or "", category=row.category or "",
-                year=row.year or "", error=f"timeout: {e}",
+                vin=row.vin, error=f"timeout: {e}",
             )
         except Exception as e:  # noqa: BLE001
             r = LookupResult(
                 timestamp=datetime.now().isoformat(timespec="seconds"),
-                vin=row.vin, make=row.make or "", category=row.category or "",
-                year=row.year or "", error=f"{type(e).__name__}: {e}",
+                vin=row.vin, error=f"{type(e).__name__}: {e}",
             )
 
         if r.paint_code:
@@ -943,12 +931,22 @@ def dump_debug(page: Page, vin: str) -> None:
 def write_results(results: list[LookupResult]) -> None:
     """Append to results.csv. If the existing CSV has a different header,
     archive it and start fresh."""
-    fields = list(LookupResult.__annotations__.keys())
+    # Explicit (field, header) pairs — keeps Python field names idiomatic
+    # while giving the CSV a friendly Title Case header row.
+    columns = [
+        ("timestamp",         "Timestamp"),
+        ("vin",               "Vin"),
+        ("paint_code",        "Paint code"),
+        ("paint_description", "Paint description"),
+        ("via",               "Via"),
+        ("error",             "Error"),
+    ]
+    headers = [h for _, h in columns]
 
     if RESULTS_FILE.exists():
         with RESULTS_FILE.open("r", newline="") as f:
             existing_header = next(csv.reader(f), [])
-        if existing_header and existing_header != fields:
+        if existing_header and existing_header != headers:
             archive = RESULTS_FILE.with_suffix(
                 f".old-{datetime.now():%Y%m%d-%H%M%S}.csv"
             )
@@ -958,11 +956,12 @@ def write_results(results: list[LookupResult]) -> None:
 
     new_file = not RESULTS_FILE.exists()
     with RESULTS_FILE.open("a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
+        w = csv.writer(f)
         if new_file:
-            w.writeheader()
+            w.writerow(headers)
         for r in results:
-            w.writerow(asdict(r))
+            row = [getattr(r, field, "") for field, _ in columns]
+            w.writerow(row)
 
 
 def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
@@ -1069,11 +1068,11 @@ def main() -> None:
 
     write_results(results)
     print()
-    print(f"{'VIN':<19} {'BRAND':<32} {'PAINT':<8} {'YEAR':<6} {'VIA':<10} ERROR")
+    print(f"{'VIN':<19} {'PAINT':<8} {'DESCRIPTION':<28} {'VIA':<10} ERROR")
     print("-" * 105)
     for r in results:
-        print(f"{r.vin:<19} {r.brand[:32]:<32} {r.paint_code:<8} "
-              f"{r.year:<6} {r.via:<10} {r.error}")
+        print(f"{r.vin:<19} {r.paint_code:<8} "
+              f"{r.paint_description[:28]:<28} {r.via:<10} {r.error}")
     print(f"\nappended to {RESULTS_FILE.name}")
 
 
