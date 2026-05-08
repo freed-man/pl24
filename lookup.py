@@ -775,7 +775,7 @@ def collect_all_text(page: Page) -> str:
     return "\n".join(parts)
 
 
-def wait_for_vehicle_data(page: Page, timeout_ms: int = 30_000) -> str | None:
+def wait_for_vehicle_data(page: Page, timeout_ms: int = 12_000) -> str | None:
     waited = 0
     interval = 750
     while waited < timeout_ms:
@@ -850,7 +850,7 @@ def _try_catalog(page: Page, vin: str, brand: str, result: LookupResult,
                 dump_debug(catalog, vin)
             return False, f"VIN box not found in {brand} catalog"
 
-        text = wait_for_vehicle_data(catalog, timeout_ms=30_000)
+        text = wait_for_vehicle_data(catalog, timeout_ms=12_000)
         if text is None:
             if debug:
                 dump_debug(catalog, vin)
@@ -895,7 +895,7 @@ def _try_dashboard(page: Page, vin: str, result: LookupResult,
             dump_debug(page, vin + "_dashboard")
         return False, "dashboard fallback: SEARCH VIN box not found"
 
-    text = wait_for_vehicle_data(page, timeout_ms=30_000)
+    text = wait_for_vehicle_data(page, timeout_ms=12_000)
     if text is None:
         if debug:
             dump_debug(page, vin + "_dashboard")
@@ -967,8 +967,13 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
 def lookup_vin_with_retry(page: Page, row: LookupRow, debug: bool,
                           allow_dashboard_fallback: bool = True,
                           ) -> LookupResult:
-    """Retry only on transient errors. Logical errors return on first try."""
+    """Retry only on genuine browser-side exceptions (Playwright timeout,
+    network errors, etc.). 'No data' / 'paint code not found' / 'VIN not
+    in DB' are logical outcomes returned cleanly from lookup_vin, and
+    retrying them just wastes time — they'll always produce the same
+    result."""
     for attempt in range(MAX_RETRIES + 1):
+        was_exception = False
         try:
             r = lookup_vin(page, row, debug=debug,
                            allow_dashboard_fallback=allow_dashboard_fallback)
@@ -977,19 +982,15 @@ def lookup_vin_with_retry(page: Page, row: LookupRow, debug: bool,
                 timestamp=datetime.now().isoformat(timespec="seconds"),
                 vin=row.vin, error=f"timeout: {e}",
             )
+            was_exception = True
         except Exception as e:  # noqa: BLE001
             r = LookupResult(
                 timestamp=datetime.now().isoformat(timespec="seconds"),
                 vin=row.vin, error=f"{type(e).__name__}: {e}",
             )
+            was_exception = True
 
-        if r.paint_code:
-            return r
-        retryable = (
-            "timeout" in r.error.lower()
-            or "did not load" in r.error.lower()
-        )
-        if not retryable:
+        if r.paint_code or not was_exception:
             return r
 
         if attempt < MAX_RETRIES:
