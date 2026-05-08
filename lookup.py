@@ -615,9 +615,21 @@ def submit_vin_on_dashboard(page: Page, vin: str) -> bool:
 # ---------- vehicle data extraction -----------------------------------------
 
 PAINT_CODE_PATTERNS = [
+    # VW/Audi: "Exterior color / Paint Code\n8E / A7W" — code after the slash.
     re.compile(
         r"Exterior\s*colou?r\s*/\s*Paint\s*Code\s*[:\n]?\s*"
         r"[A-Z0-9]+\s*/\s*([A-Z0-9]{2,8})",
+        re.I,
+    ),
+    # BMW/MINI: "Color\nSTERLINGGRAU (472)" — code in parens after the
+    # colour name. Label is just "Color" / "Colour" / "Farbe" with no
+    # trailing "Code". The colour-name run may include letters, digits,
+    # spaces, hyphens and slashes (e.g. "BLACK SAPPHIRE METALLIC",
+    # "MINERAL GREY METALLIC").
+    re.compile(
+        r"(?:Exterior\s*)?(?:Colou?r|Farbe)\s*[:\n]\s*"
+        r"[A-Z0-9][A-Z0-9 \-/]*?"
+        r"\s*\(\s*([A-Z0-9]{2,8})\s*\)",
         re.I,
     ),
     re.compile(r"Paint\s*Code\s*[:\n]\s*([A-Z0-9]{2,8})", re.I),
@@ -633,7 +645,15 @@ EXTRA_FIELD_PATTERNS = {
 }
 
 VEHICLE_DATA_NEEDLE = re.compile(
-    r"Paint\s*Code|Lackcode|Farbcode|Vehicle Identification", re.I
+    # Catch:
+    #  - "Paint Code" / "Lackcode" / "Farbcode" labels (VW/Audi/MB/etc.)
+    #  - "Colour Code" / "Color Code" labels
+    #  - bare "Color"/"Colour"/"Farbe" with a parenthesised code (BMW/MINI)
+    #  - the catalog-page heading "Vehicle Identification"
+    r"Paint\s*Code|Lackcode|Farbcode|Colou?r\s*Code|"
+    r"(?:Colou?r|Farbe)\s*\n\s*[A-Z0-9][A-Z0-9 \-/]*\(\s*[A-Z0-9]{2,8}\s*\)|"
+    r"Vehicle Identification",
+    re.I,
 )
 
 VIN_NOT_FOUND_PHRASES = (
