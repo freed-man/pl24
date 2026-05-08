@@ -7,6 +7,9 @@ storage_state.json
 results.csv
 _debug/
 
+# Local docs
+README.md
+
 # Python
 __pycache__/
 *.pyc
