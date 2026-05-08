@@ -344,6 +344,8 @@ def fetch_partslink24_brand_list(page: Page) -> dict[str, str] | None:
         tab = page.context.new_page()
         try:
             tab.goto(HOME_URL, wait_until="domcontentloaded", timeout=20_000)
+            # If we hit the bookmark-warning interstitial, click through.
+            handle_attention_page(tab)
             html = tab.content()
         finally:
             try:
@@ -427,6 +429,50 @@ def handle_session_squeeze_out(page: Page) -> bool:
     return True
 
 
+def handle_attention_page(page: Page) -> bool:
+    """Detect and dismiss the partslink24 'Attention - Please read carefully'
+    bookmark-warning page, which intercepts direct navigation to login.do.
+
+    The page has no login form, just a heading and a Reload link that
+    redirects to the proper login flow. We detect by heading text and
+    click Reload; if we somehow land back on it, we bail rather than loop.
+    Returns True if the page was detected and handled."""
+    # Cheap check first — only do the click work if the heading is present.
+    heading = page.locator('h1, h2').filter(has_text="Attention").first
+    try:
+        if not heading.count() or not heading.is_visible():
+            return False
+    except Exception:
+        return False
+
+    log("attention/bookmark-warning page detected -> clicking Reload")
+    reload_link = page.locator('a').filter(has_text=re.compile(r"^\s*Reload\s*$",
+                                                                 re.I)).first
+    if not reload_link.count():
+        # Heading was there but no Reload link — page changed format. Log
+        # and continue; the caller will fail downstream with a clearer
+        # error from is_logged_in.
+        log("attention page found but no Reload link; continuing")
+        return False
+
+    try:
+        with page.expect_navigation(wait_until="domcontentloaded",
+                                    timeout=15_000):
+            reload_link.click()
+    except PlaywrightTimeoutError:
+        log("attention page: navigation after Reload click timed out")
+
+    # Make sure we didn't loop back to the same warning.
+    looped = page.locator('h1, h2').filter(has_text="Attention").first
+    try:
+        if looped.count() and looped.is_visible():
+            log("attention page: still showing after Reload — bailing")
+            return False
+    except Exception:
+        pass
+    return True
+
+
 # ---------- login ------------------------------------------------------------
 
 def is_logged_in(page: Page) -> bool:
@@ -450,6 +496,7 @@ def login(page: Page) -> None:
 
     log("logging in")
     page.goto(LOGIN_URL, wait_until="domcontentloaded")
+    handle_attention_page(page)  # bookmark-warning interstitial
     handle_cookie_consent(page)
     handle_session_squeeze_out(page)
 
@@ -506,8 +553,19 @@ def open_catalog(page: Page, brand: str) -> "Page | None":
     except PlaywrightTimeoutError:
         pass
 
+    # Session expired -> partslink24 redirects to either the login page
+    # (password field visible) or its bookmark-warning interstitial
+    # (Attention heading). In either case we treat it as expired and let
+    # the caller re-login.
     if catalog.locator('input[type="password"]:visible').count():
         log("session expired (catalog tab redirected to login)")
+        try:
+            catalog.close()
+        except Exception:
+            pass
+        return None
+    if catalog.locator('h1, h2').filter(has_text="Attention").first.count():
+        log("session expired (catalog tab redirected to attention page)")
         try:
             catalog.close()
         except Exception:
@@ -716,6 +774,9 @@ def _try_dashboard(page: Page, vin: str, result: LookupResult,
 
     if page.locator('input[type="password"]:visible').count():
         log("dashboard fallback: session expired, re-logging in")
+        login(page)
+    elif page.locator('h1, h2').filter(has_text="Attention").first.count():
+        log("dashboard fallback: attention page shown, re-logging in")
         login(page)
 
     if not submit_vin_on_dashboard(page, vin):
