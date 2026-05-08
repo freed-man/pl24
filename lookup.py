@@ -429,6 +429,33 @@ def handle_session_squeeze_out(page: Page) -> bool:
     return True
 
 
+def _wait_for_squeeze_or_form(page: Page, timeout_ms: int = 15_000) -> str:
+    """Wait until either the squeeze-out prompt or the login form's password
+    field becomes visible. Returns 'squeeze', 'form', or 'timeout'.
+
+    partslink24's startup runs an async session check after DOMContentLoaded,
+    so we have to wait for the JS to decide which UI to show — checking
+    once on page-ready isn't enough."""
+    waited = 0
+    interval = 250
+    while waited < timeout_ms:
+        try:
+            squeeze = page.locator('#sessionSqueezeOutPrompt').first
+            if squeeze.count() and squeeze.is_visible():
+                return "squeeze"
+        except Exception:
+            pass
+        try:
+            pw = page.locator('#inputPassword').first
+            if pw.count() and pw.is_visible():
+                return "form"
+        except Exception:
+            pass
+        page.wait_for_timeout(interval)
+        waited += interval
+    return "timeout"
+
+
 def handle_attention_page(page: Page) -> bool:
     """Detect and dismiss the partslink24 'Attention - Please read carefully'
     bookmark-warning page, which intercepts direct navigation to login.do.
@@ -498,15 +525,35 @@ def login(page: Page) -> None:
     page.goto(LOGIN_URL, wait_until="domcontentloaded")
     handle_attention_page(page)  # bookmark-warning interstitial
     handle_cookie_consent(page)
-    handle_session_squeeze_out(page)
 
-    pw_field = page.locator('#inputPassword').first
-    pw_field.wait_for(state="visible", timeout=15_000)
+    # partslink24 runs an async session check on page load. The result is
+    # either: (a) the squeeze-out prompt — a previous session is still
+    # active and we must Confirm to end it before the login form appears;
+    # or (b) the login form itself, ready to fill. Wait for whichever the
+    # server decides on.
+    state = _wait_for_squeeze_or_form(page, timeout_ms=15_000)
+    if state == "squeeze":
+        log("session squeeze-out -> Confirm (pre-form)")
+        page.locator('#squeezeout-login-btn').first.click()
+        # After Confirm, the form should appear; wait for it.
+        state = _wait_for_squeeze_or_form(page, timeout_ms=15_000)
+    if state != "form":
+        _dump_login_failure(page)
+        raise RuntimeError(
+            f"login failed: form never became visible "
+            f"(state={state!r}); see {DEBUG_DIR.name}/login_failed.*"
+        )
 
     page.locator('#login-id').first.fill(p_id)
     page.locator('#login-name').first.fill(user)
-    pw_field.fill(pw)
+    page.locator('#inputPassword').first.fill(pw)
     page.locator('#login-btn').first.click()
+
+    # After clicking Login, partslink24 may also throw up a squeeze-out
+    # (if a session reappeared between our load and our submit). Give it
+    # a moment, then handle if needed.
+    page.wait_for_timeout(1_500)
+    handle_session_squeeze_out(page)
 
     try:
         page.locator('input[placeholder*="SEARCH VIN" i]').first.wait_for(
@@ -517,12 +564,59 @@ def login(page: Page) -> None:
 
     if not is_logged_in(page):
         _dump_login_failure(page)
-        err = page.locator('#loginErrorDiv, .error, .alert').first
-        msg = err.inner_text().strip() if err.count() else "(no error text)"
+        msg = _extract_login_error(page)
         raise RuntimeError(f"login failed: {msg}")
 
     log("logged in, saved session")
     page.context.storage_state(path=str(STATE_FILE))
+
+
+def _extract_login_error(page: Page) -> str:
+    """Pull the actual error message off the login page.
+
+    partslink24's HTML puts a literal '►' bullet character in its own
+    <span class='error'> sibling next to the real message, so just
+    grabbing the first .error gives us a useless arrow. We try harder:
+
+      1. #loginErrorDiv has the dedicated text, when populated
+      2. all visible .error spans, concatenated, with the bullet stripped
+      3. fall back to the page URL + title so the user has *something*
+    """
+    # 1. Dedicated error div.
+    err_div = page.locator('#loginErrorDiv')
+    try:
+        if err_div.count():
+            text = err_div.inner_text().strip()
+            if text:
+                return text
+    except Exception:
+        pass
+
+    # 2. All .error / .alert spans, joined; drop the bullet glyph and
+    # any whitespace-only bits.
+    parts: list[str] = []
+    try:
+        spans = page.locator('.error, .alert')
+        for i in range(spans.count()):
+            try:
+                t = spans.nth(i).inner_text().strip()
+            except Exception:
+                continue
+            t = t.replace("►", "").strip()
+            if t and t not in parts:
+                parts.append(t)
+    except Exception:
+        pass
+    if parts:
+        return " | ".join(parts)
+
+    # 3. Last resort — just say where we are.
+    try:
+        url = page.url
+        title = page.title()
+    except Exception:
+        url, title = "(unknown)", "(unknown)"
+    return f"(no error text on page; url={url} title={title!r})"
 
 
 def _dump_login_failure(page: Page) -> None:
