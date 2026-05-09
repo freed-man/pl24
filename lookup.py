@@ -681,12 +681,28 @@ def _wait_for_editable(box, timeout_ms: int) -> bool:
                 return True
         except Exception:
             pass
-        # Use the box's own page to sleep
         try:
             box.page.wait_for_timeout(interval)
         except Exception:
             return False
         waited += interval
+    return False
+
+
+def _is_demo_mode_catalog(catalog: Page) -> bool:
+    """Detect the 'Demo' watermark on catalogs the account does not have
+    a subscription for. partslink24 renders such catalogs with a CSS
+    class like '_demo_<hash>' on the header (Dacia, Renault and others
+    that need separate subscriptions). The VIN input is permanently
+    disabled in this state — no point retrying or waiting."""
+    try:
+        # Match class names containing "_demo_" anywhere — partslink24
+        # uses CSS modules so the suffix is a build hash that changes.
+        demo_marker = catalog.locator('[class*="_demo_"]').first
+        if demo_marker.count():
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -699,7 +715,15 @@ def submit_vin_in_catalog(catalog: Page, vin: str) -> tuple[bool, str | None]:
     fast with our own 12s budget rather than letting Playwright's fill()
     hang for its default 30s.
 
+    Also detects the 'Demo' watermark — partslink24 shows demo catalogs
+    for brands the account doesn't subscribe to, with the VIN input
+    permanently disabled. We bail out with a clear message in that case
+    rather than waiting 12s for an input that will never enable.
+
     Returns (True, None) on success, or (False, reason) on failure."""
+    if _is_demo_mode_catalog(catalog):
+        return False, "catalog is in demo mode (no subscription on this account)"
+
     box = catalog.locator(
         'input[placeholder*="Direct entry" i], '
         'input[placeholder*="Direkteingabe" i], '

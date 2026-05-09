@@ -13,7 +13,8 @@ column of `results.csv`, what each means, and how to fix or triage it.
 | `unknown make 'X'` | Make in `lookups.txt` doesn't match any in `MAKE_TO_BRAND` | Check spelling; if legitimate, the brand needs adding to the script |
 | `no make supplied` | Empty make column in `lookups.txt` | Add the make |
 | `login failed: <message>` | Login flow ended up not logged in | The message tells you why — check `env.py`, account status, or retry |
-| `VIN box never became editable` | Catalog UI rendered but input stayed disabled | Often means partslink24 has nothing for this VIN |
+| `catalog is in demo mode` | Account doesn't have a subscription for this brand | Subscribe to the brand or accept it can't be looked up |
+| `VIN box never became editable` | Catalog UI rendered but input stayed disabled (and not demo mode) | Run with `--debug` and check the screenshot |
 | `VIN box not visible` | Catalog UI didn't render the input at all | Run with `--debug` and check the screenshot |
 | `dashboard fallback: SEARCH VIN box ...` | Same family of issues for the dashboard search | As above |
 | `timeout: <details>` | Playwright's own browser-level timeout | Usually transient — retry happens automatically |
@@ -101,6 +102,21 @@ brand was added to one map without the other.
 
 ## Navigation / page loading errors
 
+### `catalog is in demo mode (no subscription on this account) (<brand> catalog)`
+
+The catalog opened but partslink24 served the demo version because your
+account doesn't have a subscription for that brand. Common for: Dacia,
+Renault, sometimes others. Detected by the `_demo_*` CSS class on the
+catalog page header.
+
+In demo mode the VIN input is permanently disabled — there is nothing
+the script can do to look up VINs. The dashboard fallback will also
+fail unless the same VIN happens to appear in another (subscribed)
+brand's database.
+
+**Fix**: subscribe to that brand on partslink24, or accept that VINs
+for that brand can't be looked up.
+
 ### `VIN box not visible (<brand> catalog)`
 
 The catalog page opened, but the VIN input field never became visible
@@ -110,13 +126,12 @@ is having issues. Run with `--debug` to see the page state.
 ### `VIN box visible but never became editable (<brand> catalog)`
 
 The catalog rendered the VIN input box but it stayed disabled (greyed
-out) for 12 seconds. Common cause: that catalog's JavaScript init
-didn't finish — sometimes happens with Material UI based catalogs like
-Dacia.
+out) for 12 seconds. Distinct from demo mode (which is detected
+upfront): this is for cases where a catalog you do have a subscription
+to is having JS init problems.
 
-Often partslink24 simply has nothing to show for that VIN and never
-enables the input. **Fix**: nothing to fix on our side; partslink24 is
-not responsive for this VIN.
+**Diagnostic**: run with `--debug` and check `_debug/<vin>.png` to see
+what the page actually looked like.
 
 ### `VIN box fill timed out (<brand> catalog)`
 
