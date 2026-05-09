@@ -13,8 +13,8 @@ column of `results.csv`, what each means, and how to fix or triage it.
 | `unknown make 'X'` | Make in `lookups.txt` doesn't match any in `MAKE_TO_BRAND` | Check spelling; if legitimate, the brand needs adding to the script |
 | `no make supplied` | Empty make column in `lookups.txt` | Add the make |
 | `login failed: <message>` | Login flow ended up not logged in | The message tells you why — check `env.py`, account status, or retry |
-| `catalog is in demo mode` | Account doesn't have a subscription for this brand | Subscribe to the brand or accept it can't be looked up |
-| `VIN box never became editable` | Catalog UI rendered but input stayed disabled (and not demo mode) | Run with `--debug` and check the screenshot |
+| `catalog showing demo overlay` | partslink24 has decided this catalog can't accept VIN lookups (no subscription, or partslink24 outage for that brand) | Try the catalog manually in your browser to see the underlying reason |
+| `VIN box never became editable` | Catalog UI rendered but input stayed disabled (and not demo overlay) | Run with `--debug` and check the screenshot |
 | `VIN box not visible` | Catalog UI didn't render the input at all | Run with `--debug` and check the screenshot |
 | `dashboard fallback: SEARCH VIN box ...` | Same family of issues for the dashboard search | As above |
 | `timeout: <details>` | Playwright's own browser-level timeout | Usually transient — retry happens automatically |
@@ -102,20 +102,29 @@ brand was added to one map without the other.
 
 ## Navigation / page loading errors
 
-### `catalog is in demo mode (no subscription on this account) (<brand> catalog)`
+### `catalog showing demo overlay (VIN lookup not available) (<brand> catalog)`
 
-The catalog opened but partslink24 served the demo version because your
-account doesn't have a subscription for that brand. Common for: Dacia,
-Renault, sometimes others. Detected by the `_demo_*` CSS class on the
-catalog page header.
+The catalog opened but partslink24 rendered it with a 'Demo' overlay
+and a permanently-disabled VIN input. We've seen partslink24 use this
+state for at least two reasons:
 
-In demo mode the VIN input is permanently disabled — there is nothing
-the script can do to look up VINs. The dashboard fallback will also
-fail unless the same VIN happens to appear in another (subscribed)
-brand's database.
+- **No subscription** for that brand on the current account.
+- **Partslink24 has temporarily disabled VIN identification for the
+  brand** (e.g. broken data feed, dealer-agreement issue). When you
+  click into the input manually, partslink24 shows a tooltip such as
+  "We regret to inform you that the identification of VINs for this
+  brand will not be available for an indefinite period of time".
 
-**Fix**: subscribe to that brand on partslink24, or accept that VINs
-for that brand can't be looked up.
+The page looks the same in both cases — we can't tell from the script
+which is happening.
+
+**Diagnostic**: open the catalog manually in your browser. If it shows
+the 'regret to inform you' message, it's a partslink24 outage. If it
+asks you to subscribe, it's a subscription issue.
+
+**Fix**: in either case, VINs for that brand can't currently be looked
+up via partslink24. The dashboard fallback runs anyway in case the VIN
+happens to be in another (subscribed) brand's database.
 
 ### `VIN box not visible (<brand> catalog)`
 
@@ -126,9 +135,9 @@ is having issues. Run with `--debug` to see the page state.
 ### `VIN box visible but never became editable (<brand> catalog)`
 
 The catalog rendered the VIN input box but it stayed disabled (greyed
-out) for 12 seconds. Distinct from demo mode (which is detected
-upfront): this is for cases where a catalog you do have a subscription
-to is having JS init problems.
+out) for 12 seconds. Distinct from the demo overlay (which is detected
+upfront): this is for catalogs that aren't in demo mode but still have
+a stuck input — usually a JS init issue.
 
 **Diagnostic**: run with `--debug` and check `_debug/<vin>.png` to see
 what the page actually looked like.

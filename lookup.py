@@ -26,8 +26,8 @@ lookups.txt format (whitespace tolerated, # for comments):
 
 Only `vin` is strictly required. Missing make causes the row to be
 recorded as an error (we don't guess). Missing category defaults to
-passenger. Year is captured for the output CSV but doesn't affect
-routing yet.
+passenger. Year is captured but currently unused — reserved for future
+Classic-catalogue routing once partslink24 confirms cutoff dates.
 
 Usage:
     python lookup.py                    # process all rows in lookups.txt
@@ -689,17 +689,30 @@ def _wait_for_editable(box, timeout_ms: int) -> bool:
     return False
 
 
-def _is_demo_mode_catalog(catalog: Page) -> bool:
-    """Detect the 'Demo' watermark on catalogs the account does not have
-    a subscription for. partslink24 renders such catalogs with a CSS
-    class like '_demo_<hash>' on the header (Dacia, Renault and others
-    that need separate subscriptions). The VIN input is permanently
-    disabled in this state — no point retrying or waiting."""
+def _is_demo_catalog(catalog: Page) -> bool:
+    """Detect a 'Demo' overlay on the catalog page.
+
+    partslink24 renders some catalogs with a faint 'Demo' watermark and
+    a permanently-disabled VIN input. Reasons we've seen partslink24 use
+    this state include:
+
+      - The account doesn't have a subscription for that brand.
+      - partslink24 has temporarily disabled VIN identification for the
+        brand (e.g. data feed broken, dealer agreement issue). When you
+        click into the input manually, partslink24 shows a tooltip
+        like 'We regret to inform you that the identification of VINs
+        for this brand will not be available for an indefinite period
+        of time'.
+
+    We can't tell which from the page alone — both render the same
+    CSS class. Either way, the VIN input won't accept input, so we
+    bail out fast rather than waiting on something that won't change.
+
+    Marker: a `_demo_<hash>` CSS class anywhere on the page (CSS-module
+    suffix, build-hash, so we match by substring)."""
     try:
-        # Match class names containing "_demo_" anywhere — partslink24
-        # uses CSS modules so the suffix is a build hash that changes.
-        demo_marker = catalog.locator('[class*="_demo_"]').first
-        if demo_marker.count():
+        marker = catalog.locator('[class*="_demo_"]').first
+        if marker.count():
             return True
     except Exception:
         pass
@@ -709,20 +722,20 @@ def _is_demo_mode_catalog(catalog: Page) -> bool:
 def submit_vin_in_catalog(catalog: Page, vin: str) -> tuple[bool, str | None]:
     """Wait for the catalog's VIN input and submit the VIN.
 
-    Some catalogs (Dacia, others using MUI) render the input visible but
-    disabled while their JS finishes initialising, so we wait explicitly
-    for the editable state. If the input never becomes editable, we fail
-    fast with our own 12s budget rather than letting Playwright's fill()
-    hang for its default 30s.
+    Three failure modes we handle explicitly:
 
-    Also detects the 'Demo' watermark — partslink24 shows demo catalogs
-    for brands the account doesn't subscribe to, with the VIN input
-    permanently disabled. We bail out with a clear message in that case
-    rather than waiting 12s for an input that will never enable.
+      1. Catalog rendered in 'Demo' mode (see _is_demo_catalog) —
+         partslink24 has decided this catalog can't accept VIN lookups.
+         We bail out immediately.
+      2. VIN input never becomes visible within 12s — catalog UI is
+         broken or has changed.
+      3. VIN input visible but never becomes editable within 12s — the
+         element exists but is disabled. Failing fast here is much
+         better than letting Playwright's fill() hang for 30s.
 
     Returns (True, None) on success, or (False, reason) on failure."""
-    if _is_demo_mode_catalog(catalog):
-        return False, "catalog is in demo mode (no subscription on this account)"
+    if _is_demo_catalog(catalog):
+        return False, "catalog showing demo overlay (VIN lookup not available)"
 
     box = catalog.locator(
         'input[placeholder*="Direct entry" i], '
@@ -1227,7 +1240,9 @@ def main() -> None:
                     help="EU type-approval category (M1/N1/N2/N3) or "
                          "'commercial'/'passenger'. Used to route N* "
                          "vehicles to commercial catalogues.")
-    ap.add_argument("--year", help="model year (recorded in CSV)")
+    ap.add_argument("--year", help="model year (currently unused; "
+                                    "reserved for future Classic-catalogue "
+                                    "routing)")
     ap.add_argument("--debug", action="store_true",
                     help="show browser + dump HTML on failure")
     ap.add_argument("--fresh", action="store_true",
