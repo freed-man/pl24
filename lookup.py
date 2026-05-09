@@ -722,21 +722,21 @@ def _is_demo_catalog(catalog: Page) -> bool:
 def submit_vin_in_catalog(catalog: Page, vin: str) -> tuple[bool, str | None]:
     """Wait for the catalog's VIN input and submit the VIN.
 
-    Three failure modes we handle explicitly:
+    The check for the demo overlay races against the wait for the input
+    to become editable: whichever the catalog page settles into first,
+    we act on that. We can't check for demo upfront because some React-
+    based catalogs (Dacia) haven't rendered the demo class at the moment
+    we get the page object — the class only appears once the React tree
+    has mounted and the API has answered with the demo state.
 
-      1. Catalog rendered in 'Demo' mode (see _is_demo_catalog) —
-         partslink24 has decided this catalog can't accept VIN lookups.
-         We bail out immediately.
-      2. VIN input never becomes visible within 12s — catalog UI is
-         broken or has changed.
-      3. VIN input visible but never becomes editable within 12s — the
-         element exists but is disabled. Failing fast here is much
-         better than letting Playwright's fill() hang for 30s.
+    Failure modes returned:
+      - 'catalog showing demo overlay ...' — the demo class appeared
+        before the input became editable
+      - 'VIN box not visible' — input never rendered at all in 12s
+      - 'VIN box visible but never became editable' — input rendered
+        but stayed disabled and no demo overlay was detected
 
     Returns (True, None) on success, or (False, reason) on failure."""
-    if _is_demo_catalog(catalog):
-        return False, "catalog showing demo overlay (VIN lookup not available)"
-
     box = catalog.locator(
         'input[placeholder*="Direct entry" i], '
         'input[placeholder*="Direkteingabe" i], '
@@ -748,9 +748,39 @@ def submit_vin_in_catalog(catalog: Page, vin: str) -> tuple[bool, str | None]:
     try:
         box.wait_for(state="visible", timeout=12_000)
     except PlaywrightTimeoutError:
+        # Input never rendered — but check demo as a final tiebreaker,
+        # in case the demo overlay is the *reason* the input is missing.
+        if _is_demo_catalog(catalog):
+            return False, "catalog showing demo overlay (VIN lookup not available)"
         return False, "VIN box not visible"
-    if not _wait_for_editable(box, timeout_ms=12_000):
+
+    # Now race: input becoming editable vs the demo overlay appearing.
+    # Both can take a moment after the page renders (React state
+    # transitions, API responses), so we poll for ~12s.
+    waited = 0
+    interval = 250
+    timeout_ms = 12_000
+    while waited < timeout_ms:
+        try:
+            if box.is_editable():
+                break
+        except Exception:
+            pass
+        if _is_demo_catalog(catalog):
+            return False, "catalog showing demo overlay (VIN lookup not available)"
+        try:
+            catalog.wait_for_timeout(interval)
+        except Exception:
+            return False, "page closed while waiting for VIN box"
+        waited += interval
+    else:
+        # Loop exhausted without break — input never editable. One last
+        # demo check before giving up, in case the overlay rendered
+        # right at the end.
+        if _is_demo_catalog(catalog):
+            return False, "catalog showing demo overlay (VIN lookup not available)"
         return False, "VIN box visible but never became editable"
+
     try:
         box.fill(vin, timeout=5_000)
         box.press("Enter")
@@ -1209,8 +1239,13 @@ def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
         ))
 
     if debug:
-        log("debug: leaving browser open for 30s")
-        page.wait_for_timeout(30_000)
+        had_failures = any(not r.paint_code for r in results)
+        if had_failures:
+            log("debug: leaving browser open for 15s "
+                "(at least one lookup failed)")
+            page.wait_for_timeout(15_000)
+        else:
+            log("debug: all lookups succeeded, closing browser")
 
     context.close()
     browser.close()
