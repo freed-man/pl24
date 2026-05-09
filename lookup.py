@@ -668,14 +668,36 @@ def open_catalog(page: Page, brand: str) -> "Page | None":
     return catalog
 
 
+def _wait_for_editable(box, timeout_ms: int) -> bool:
+    """Poll Locator.is_editable() until True or timeout. Playwright's
+    wait_for(state=...) doesn't accept 'editable' (only attached/detached/
+    visible/hidden), so we poll explicitly. is_editable returns True only
+    when the element is enabled AND not readonly."""
+    waited = 0
+    interval = 250
+    while waited < timeout_ms:
+        try:
+            if box.is_editable():
+                return True
+        except Exception:
+            pass
+        # Use the box's own page to sleep
+        try:
+            box.page.wait_for_timeout(interval)
+        except Exception:
+            return False
+        waited += interval
+    return False
+
+
 def submit_vin_in_catalog(catalog: Page, vin: str) -> tuple[bool, str | None]:
     """Wait for the catalog's VIN input and submit the VIN.
 
     Some catalogs (Dacia, others using MUI) render the input visible but
-    disabled while their JS finishes initialising, so we wait for the
-    editable state explicitly. If the input never becomes editable, we
-    fail fast with our own 12s budget rather than letting Playwright's
-    fill() hang for its default 30s.
+    disabled while their JS finishes initialising, so we wait explicitly
+    for the editable state. If the input never becomes editable, we fail
+    fast with our own 12s budget rather than letting Playwright's fill()
+    hang for its default 30s.
 
     Returns (True, None) on success, or (False, reason) on failure."""
     box = catalog.locator(
@@ -690,11 +712,7 @@ def submit_vin_in_catalog(catalog: Page, vin: str) -> tuple[bool, str | None]:
         box.wait_for(state="visible", timeout=12_000)
     except PlaywrightTimeoutError:
         return False, "VIN box not visible"
-    try:
-        # Material UI inputs are often visible-but-disabled while
-        # async init runs; wait for the disabled attribute to clear.
-        box.wait_for(state="editable", timeout=12_000)
-    except PlaywrightTimeoutError:
+    if not _wait_for_editable(box, timeout_ms=12_000):
         return False, "VIN box visible but never became editable"
     try:
         box.fill(vin, timeout=5_000)
@@ -719,9 +737,7 @@ def submit_vin_on_dashboard(page: Page, vin: str) -> tuple[bool, str | None]:
         box.wait_for(state="visible", timeout=10_000)
     except PlaywrightTimeoutError:
         return False, "SEARCH VIN box not visible"
-    try:
-        box.wait_for(state="editable", timeout=10_000)
-    except PlaywrightTimeoutError:
+    if not _wait_for_editable(box, timeout_ms=10_000):
         return False, "SEARCH VIN box never became editable"
     try:
         box.fill(vin, timeout=5_000)
