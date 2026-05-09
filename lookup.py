@@ -668,8 +668,16 @@ def open_catalog(page: Page, brand: str) -> "Page | None":
     return catalog
 
 
-def submit_vin_in_catalog(catalog: Page, vin: str) -> bool:
-    """Wait for the catalog's VIN input and submit the VIN."""
+def submit_vin_in_catalog(catalog: Page, vin: str) -> tuple[bool, str | None]:
+    """Wait for the catalog's VIN input and submit the VIN.
+
+    Some catalogs (Dacia, others using MUI) render the input visible but
+    disabled while their JS finishes initialising, so we wait for the
+    editable state explicitly. If the input never becomes editable, we
+    fail fast with our own 12s budget rather than letting Playwright's
+    fill() hang for its default 30s.
+
+    Returns (True, None) on success, or (False, reason) on failure."""
     box = catalog.locator(
         'input[placeholder*="Direct entry" i], '
         'input[placeholder*="Direkteingabe" i], '
@@ -679,18 +687,28 @@ def submit_vin_in_catalog(catalog: Page, vin: str) -> bool:
         'input[name*="fin" i]'
     ).first
     try:
-        box.wait_for(state="visible", timeout=20_000)
+        box.wait_for(state="visible", timeout=12_000)
     except PlaywrightTimeoutError:
-        return False
-    box.fill(vin)
-    box.press("Enter")
-    return True
+        return False, "VIN box not visible"
+    try:
+        # Material UI inputs are often visible-but-disabled while
+        # async init runs; wait for the disabled attribute to clear.
+        box.wait_for(state="editable", timeout=12_000)
+    except PlaywrightTimeoutError:
+        return False, "VIN box visible but never became editable"
+    try:
+        box.fill(vin, timeout=5_000)
+        box.press("Enter")
+    except PlaywrightTimeoutError:
+        return False, "VIN box fill timed out"
+    return True, None
 
 
 # ---------- dashboard SEARCH VIN fallback -----------------------------------
 
-def submit_vin_on_dashboard(page: Page, vin: str) -> bool:
-    """Find the dashboard's SEARCH VIN box and submit the VIN."""
+def submit_vin_on_dashboard(page: Page, vin: str) -> tuple[bool, str | None]:
+    """Find the dashboard's SEARCH VIN box and submit the VIN.
+    Returns (True, None) on success, or (False, reason) on failure."""
     box = page.locator(
         'input[placeholder*="SEARCH VIN" i], '
         'input[placeholder*="VIN" i], '
@@ -700,10 +718,17 @@ def submit_vin_on_dashboard(page: Page, vin: str) -> bool:
     try:
         box.wait_for(state="visible", timeout=10_000)
     except PlaywrightTimeoutError:
-        return False
-    box.fill(vin)
-    box.press("Enter")
-    return True
+        return False, "SEARCH VIN box not visible"
+    try:
+        box.wait_for(state="editable", timeout=10_000)
+    except PlaywrightTimeoutError:
+        return False, "SEARCH VIN box never became editable"
+    try:
+        box.fill(vin, timeout=5_000)
+        box.press("Enter")
+    except PlaywrightTimeoutError:
+        return False, "SEARCH VIN box fill timed out"
+    return True, None
 
 
 # ---------- vehicle data extraction -----------------------------------------
@@ -874,11 +899,13 @@ def _try_catalog(page: Page, vin: str, brand: str, result: LookupResult,
         return False, "could not open catalog after re-login"
 
     try:
-        if not submit_vin_in_catalog(catalog, vin):
+        ok, err = submit_vin_in_catalog(catalog, vin)
+        if not ok:
             if debug:
                 dump_debug(catalog, vin)
-            return False, f"VIN box not found in {brand} catalog"
+            return False, f"{err} ({brand} catalog)"
 
+        log(f"VIN submitted, waiting up to 12s for vehicle data")
         text = wait_for_vehicle_data(catalog, timeout_ms=12_000)
         if text is None:
             if debug:
@@ -919,11 +946,13 @@ def _try_dashboard(page: Page, vin: str, result: LookupResult,
         log("dashboard fallback: attention page shown, re-logging in")
         login(page)
 
-    if not submit_vin_on_dashboard(page, vin):
+    ok, err = submit_vin_on_dashboard(page, vin)
+    if not ok:
         if debug:
             dump_debug(page, vin + "_dashboard")
-        return False, "dashboard fallback: SEARCH VIN box not found"
+        return False, f"dashboard fallback: {err}"
 
+    log(f"dashboard VIN submitted, waiting up to 12s for vehicle data")
     text = wait_for_vehicle_data(page, timeout_ms=12_000)
     if text is None:
         if debug:
