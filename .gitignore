@@ -10,6 +10,7 @@ _debug/
 
 # Local docs
 README.md
+ERRORS.md
 
 # Python
 __pycache__/
