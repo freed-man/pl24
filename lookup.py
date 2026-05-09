@@ -725,29 +725,57 @@ PAINT_CODE_PATTERNS = [
         r"\s*\(\s*([A-Z0-9]{2,8})\s*\)",
         re.I,
     ),
+    # PSA (Peugeot/Citroën/DS): "BODY COLOUR\nEVL - PLATINUM GREY PAINT".
+    # The code precedes the name, separated by " - ", and the value
+    # always ends with " PAINT". Anchor on both the specific "BODY
+    # COLOUR" label (so we don't match "UPHOLSTERY COLOUR" etc.) and the
+    # trailing "PAINT" word so we don't run into the next row.
+    re.compile(
+        r"BODY\s*COLOU?R\s*\n\s*"
+        r"([A-Z0-9]{2,6})"            # the code
+        r"\s*-\s*"
+        r".+?"                        # the name (consumed but not captured here)
+        r"\s+PAINT\b",
+        re.I,
+    ),
     re.compile(r"Paint\s*Code\s*[:\n]\s*([A-Z0-9]{2,8})", re.I),
     re.compile(r"Colou?r\s*Code\s*[:\n]\s*([A-Z0-9]{2,8})", re.I),
     re.compile(r"Farbcode\s*[:\n]\s*([A-Z0-9]{2,8})", re.I),
     re.compile(r"Lackcode\s*[:\n]\s*([A-Z0-9]{2,8})", re.I),
 ]
 
-# Captures the human-readable colour name where the page provides one
-# (BMW/MINI format). VW/Audi don't include a colour name in this block,
-# so this extractor returns "" for those.
-PAINT_DESCRIPTION_PATTERN = re.compile(
-    r"(?:Exterior\s*)?(?:Colou?r|Farbe)\s*[:\n]\s*"
-    r"([A-Z0-9][A-Z0-9 \-/]*?)"            # the colour name
-    r"\s*\(\s*[A-Z0-9]{2,8}\s*\)",          # immediately followed by (code)
-    re.I,
-)
+# Captures the human-readable colour name where the page provides one.
+# Two formats currently known:
+#  - BMW/MINI: "Color\nSTERLINGGRAU (472)" -> "STERLINGGRAU"
+#  - PSA:     "BODY COLOUR\nEVL - PLATINUM GREY PAINT" -> "PLATINUM GREY"
+# VW/Audi don't include a colour name in their paint row, so this returns
+# "" for those.
+PAINT_DESCRIPTION_PATTERNS = [
+    # BMW/MINI format
+    re.compile(
+        r"(?:Exterior\s*)?(?:Colou?r|Farbe)\s*[:\n]\s*"
+        r"([A-Z0-9][A-Z0-9 \-/]*?)"            # the colour name
+        r"\s*\(\s*[A-Z0-9]{2,8}\s*\)",          # immediately followed by (code)
+        re.I,
+    ),
+    # PSA format
+    re.compile(
+        r"BODY\s*COLOU?R\s*\n\s*"
+        r"[A-Z0-9]{2,6}\s*-\s*"
+        r"(.+?)"                                # the colour name
+        r"\s+PAINT\b",
+        re.I,
+    ),
+]
 
 VEHICLE_DATA_NEEDLE = re.compile(
     # Catch:
     #  - "Paint Code" / "Lackcode" / "Farbcode" labels (VW/Audi/MB/etc.)
     #  - "Colour Code" / "Color Code" labels
     #  - bare "Color"/"Colour"/"Farbe" with a parenthesised code (BMW/MINI)
+    #  - "BODY COLOUR" label (PSA)
     #  - the catalog-page heading "Vehicle Identification"
-    r"Paint\s*Code|Lackcode|Farbcode|Colou?r\s*Code|"
+    r"Paint\s*Code|Lackcode|Farbcode|Colou?r\s*Code|BODY\s*COLOU?R|"
     r"(?:Colou?r|Farbe)\s*\n\s*[A-Z0-9][A-Z0-9 \-/]*\(\s*[A-Z0-9]{2,8}\s*\)|"
     r"Vehicle Identification",
     re.I,
@@ -802,10 +830,11 @@ def extract_paint_description(text: str) -> str:
     """Extract the human-readable colour name (e.g. "STERLINGGRAU") and
     return it Title Cased ("Sterlinggrau"). Returns "" if no description
     is on the page (e.g. VW/Audi don't include one in the paint row)."""
-    m = PAINT_DESCRIPTION_PATTERN.search(text)
-    if not m:
-        return ""
-    return m.group(1).strip().title()
+    for pat in PAINT_DESCRIPTION_PATTERNS:
+        m = pat.search(text)
+        if m:
+            return m.group(1).strip().title()
+    return ""
 
 
 def vin_error_in_text(text: str) -> str | None:
