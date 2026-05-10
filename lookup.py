@@ -693,7 +693,7 @@ def submit_vin_in_catalog(catalog: Page, vin: str) -> tuple[bool, str | None]:
     """Wait for the catalog's VIN input and submit the VIN.
 
     Two failure modes we handle:
-      - 'VIN box not visible' — input never rendered at all in 12s.
+      - 'VIN box not visible' — input never rendered at all in 10s.
       - 'VIN box visible but never became editable' — input rendered
         but stayed disabled. Failing fast on the editable check is much
         better than letting Playwright's fill() hang for its 30s default.
@@ -708,10 +708,10 @@ def submit_vin_in_catalog(catalog: Page, vin: str) -> tuple[bool, str | None]:
         'input[name*="fin" i]'
     ).first
     try:
-        box.wait_for(state="visible", timeout=12_000)
+        box.wait_for(state="visible", timeout=10_000)
     except PlaywrightTimeoutError:
         return False, "VIN box not visible"
-    if not _wait_for_editable(box, timeout_ms=12_000):
+    if not _wait_for_editable(box, timeout_ms=10_000):
         return False, "VIN box visible but never became editable"
     try:
         box.fill(vin, timeout=5_000)
@@ -843,7 +843,7 @@ def collect_all_text(page: Page) -> str:
     return "\n".join(parts)
 
 
-def wait_for_vehicle_data(page: Page, timeout_ms: int = 12_000) -> str | None:
+def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
     waited = 0
     interval = 750
     while waited < timeout_ms:
@@ -920,8 +920,8 @@ def _try_catalog(page: Page, vin: str, brand: str, result: LookupResult,
                 dump_debug(catalog, vin)
             return False, f"{err} ({brand} catalog)"
 
-        log(f"VIN submitted, waiting up to 12s for vehicle data")
-        text = wait_for_vehicle_data(catalog, timeout_ms=12_000)
+        log(f"VIN submitted, waiting up to 10s for vehicle data")
+        text = wait_for_vehicle_data(catalog, timeout_ms=10_000)
         if text is None:
             if debug:
                 dump_debug(catalog, vin)
@@ -967,8 +967,8 @@ def _try_dashboard(page: Page, vin: str, result: LookupResult,
             dump_debug(page, vin + "_dashboard")
         return False, f"dashboard fallback: {err}"
 
-    log(f"dashboard VIN submitted, waiting up to 12s for vehicle data")
-    text = wait_for_vehicle_data(page, timeout_ms=12_000)
+    log(f"dashboard VIN submitted, waiting up to 10s for vehicle data")
+    text = wait_for_vehicle_data(page, timeout_ms=10_000)
     if text is None:
         if debug:
             dump_debug(page, vin + "_dashboard")
@@ -1085,6 +1085,11 @@ def dump_debug(page: Page, vin: str) -> None:
     except Exception:
         pass
     for i, fr in enumerate(page.frames):
+        # Skip the usercentrics cookie-consent cross-domain bridge — same
+        # boilerplate JS in every dump, useless for diagnosing partslink24
+        # issues, just adds clutter to _debug/.
+        if "usercentrics.eu" in (fr.url or ""):
+            continue
         try:
             (DEBUG_DIR / f"{vin}_frame_{i}.html").write_text(
                 fr.content(), encoding="utf-8"
@@ -1138,6 +1143,22 @@ def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
     if fresh and STATE_FILE.exists():
         STATE_FILE.unlink()
 
+    if debug and DEBUG_DIR.exists():
+        # Clear stale dumps from previous runs so this run's _debug/
+        # only contains what just happened. We only delete files we
+        # would have created — html/png — to avoid clobbering anything
+        # the user happens to have stashed in there.
+        cleared = 0
+        for f in DEBUG_DIR.iterdir():
+            if f.is_file() and f.suffix.lower() in (".html", ".png"):
+                try:
+                    f.unlink()
+                    cleared += 1
+                except OSError:
+                    pass
+        if cleared:
+            log(f"cleared {cleared} stale file(s) from {DEBUG_DIR.name}/")
+
     browser = pw.chromium.launch(
         headless=not headed,
         args=["--disable-features=Translate"],
@@ -1158,6 +1179,27 @@ def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
 
     if not STATE_FILE.exists():
         login(page)
+    else:
+        # We reused saved cookies — but partslink24 sessions expire and
+        # nothing in storage_state.json tells us whether they're still
+        # valid. Visit the home page and check; if the session has
+        # expired, partslink24 will show the login form and we re-log
+        # in cleanly. Without this, every lookup would silently run
+        # against a logged-out browser (catalogs render in demo mode,
+        # VIN inputs stay disabled, all VINs fail with the same error).
+        log("verifying saved session is still valid")
+        try:
+            page.goto(HOME_URL, wait_until="domcontentloaded", timeout=20_000)
+        except PlaywrightTimeoutError:
+            log("could not load home page to verify session; re-logging in")
+            login(page)
+        else:
+            handle_attention_page(page)
+            if not is_logged_in(page):
+                log("saved session expired; re-logging in")
+                login(page)
+            else:
+                log("saved session OK")
 
     if not skip_brand_check:
         verify_brand_list(page)
@@ -1169,15 +1211,6 @@ def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
             page, row, debug=debug,
             allow_dashboard_fallback=allow_dashboard_fallback,
         ))
-
-    if debug:
-        had_failures = any(not r.paint_code for r in results)
-        if had_failures:
-            log("debug: leaving browser open for 15s "
-                "(at least one lookup failed)")
-            page.wait_for_timeout(15_000)
-        else:
-            log("debug: all lookups succeeded, closing browser")
 
     context.close()
     browser.close()

@@ -13,7 +13,7 @@ column of `results.csv`, what each means, and how to fix or triage it.
 | `unknown make 'X'` | Make in `lookups.txt` doesn't match any in `MAKE_TO_BRAND` | Check spelling; if legitimate, the brand needs adding to the script |
 | `no make supplied` | Empty make column in `lookups.txt` | Add the make |
 | `login failed: <message>` | Login flow ended up not logged in | The message tells you why — check `env.py`, account status, or retry |
-| `VIN box never became editable` | Catalog UI rendered but input stayed disabled within 12s | Often means partslink24 won't accept VIN lookups for this brand (subscription or outage); dashboard fallback runs anyway |
+| `VIN box never became editable` | Catalog UI rendered but input stayed disabled within 10s | Often means partslink24 won't accept VIN lookups for this brand (subscription or outage); dashboard fallback runs anyway |
 | `VIN box not visible` | Catalog UI didn't render the input at all | Run with `--debug` and check the screenshot |
 | `dashboard fallback: SEARCH VIN box ...` | Same family of issues for the dashboard search | As above |
 | `timeout: <details>` | Playwright's own browser-level timeout | Usually transient — retry happens automatically |
@@ -104,13 +104,13 @@ brand was added to one map without the other.
 ### `VIN box not visible (<brand> catalog)`
 
 The catalog page opened, but the VIN input field never became visible
-within 12 seconds. Usually means the catalog UI is broken or partslink24
+within 10 seconds. Usually means the catalog UI is broken or partslink24
 is having issues. Run with `--debug` to see the page state.
 
 ### `VIN box visible but never became editable (<brand> catalog)`
 
 The catalog rendered the VIN input box but it stayed disabled (greyed
-out) for 12 seconds. Common causes:
+out) for 10 seconds. Common causes:
 
 - **partslink24 is showing a demo/locked catalog for this brand** — no
   subscription on this account, or partslink24 has temporarily disabled
