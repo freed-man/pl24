@@ -689,52 +689,14 @@ def _wait_for_editable(box, timeout_ms: int) -> bool:
     return False
 
 
-def _is_demo_catalog(catalog: Page) -> bool:
-    """Detect a 'Demo' overlay on the catalog page.
-
-    partslink24 renders some catalogs with a faint 'Demo' watermark and
-    a permanently-disabled VIN input. Reasons we've seen partslink24 use
-    this state include:
-
-      - The account doesn't have a subscription for that brand.
-      - partslink24 has temporarily disabled VIN identification for the
-        brand (e.g. data feed broken, dealer agreement issue). When you
-        click into the input manually, partslink24 shows a tooltip
-        like 'We regret to inform you that the identification of VINs
-        for this brand will not be available for an indefinite period
-        of time'.
-
-    We can't tell which from the page alone — both render the same
-    CSS class. Either way, the VIN input won't accept input, so we
-    bail out fast rather than waiting on something that won't change.
-
-    Marker: a `_demo_<hash>` CSS class anywhere on the page (CSS-module
-    suffix, build-hash, so we match by substring)."""
-    try:
-        marker = catalog.locator('[class*="_demo_"]').first
-        if marker.count():
-            return True
-    except Exception:
-        pass
-    return False
-
-
 def submit_vin_in_catalog(catalog: Page, vin: str) -> tuple[bool, str | None]:
     """Wait for the catalog's VIN input and submit the VIN.
 
-    The check for the demo overlay races against the wait for the input
-    to become editable: whichever the catalog page settles into first,
-    we act on that. We can't check for demo upfront because some React-
-    based catalogs (Dacia) haven't rendered the demo class at the moment
-    we get the page object — the class only appears once the React tree
-    has mounted and the API has answered with the demo state.
-
-    Failure modes returned:
-      - 'catalog showing demo overlay ...' — the demo class appeared
-        before the input became editable
-      - 'VIN box not visible' — input never rendered at all in 12s
+    Two failure modes we handle:
+      - 'VIN box not visible' — input never rendered at all in 12s.
       - 'VIN box visible but never became editable' — input rendered
-        but stayed disabled and no demo overlay was detected
+        but stayed disabled. Failing fast on the editable check is much
+        better than letting Playwright's fill() hang for its 30s default.
 
     Returns (True, None) on success, or (False, reason) on failure."""
     box = catalog.locator(
@@ -748,39 +710,9 @@ def submit_vin_in_catalog(catalog: Page, vin: str) -> tuple[bool, str | None]:
     try:
         box.wait_for(state="visible", timeout=12_000)
     except PlaywrightTimeoutError:
-        # Input never rendered — but check demo as a final tiebreaker,
-        # in case the demo overlay is the *reason* the input is missing.
-        if _is_demo_catalog(catalog):
-            return False, "catalog showing demo overlay (VIN lookup not available)"
         return False, "VIN box not visible"
-
-    # Now race: input becoming editable vs the demo overlay appearing.
-    # Both can take a moment after the page renders (React state
-    # transitions, API responses), so we poll for ~12s.
-    waited = 0
-    interval = 250
-    timeout_ms = 12_000
-    while waited < timeout_ms:
-        try:
-            if box.is_editable():
-                break
-        except Exception:
-            pass
-        if _is_demo_catalog(catalog):
-            return False, "catalog showing demo overlay (VIN lookup not available)"
-        try:
-            catalog.wait_for_timeout(interval)
-        except Exception:
-            return False, "page closed while waiting for VIN box"
-        waited += interval
-    else:
-        # Loop exhausted without break — input never editable. One last
-        # demo check before giving up, in case the overlay rendered
-        # right at the end.
-        if _is_demo_catalog(catalog):
-            return False, "catalog showing demo overlay (VIN lookup not available)"
+    if not _wait_for_editable(box, timeout_ms=12_000):
         return False, "VIN box visible but never became editable"
-
     try:
         box.fill(vin, timeout=5_000)
         box.press("Enter")
