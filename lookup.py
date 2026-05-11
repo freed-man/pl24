@@ -755,6 +755,15 @@ PAINT_CODE_PATTERNS = [
         r"[A-Z0-9]+\s*/\s*([A-Z0-9]{2,8})",
         re.I,
     ),
+    # Nissan: "Exterior color\tZ11" — code follows the label directly,
+    # no slash and no parentheses. Negative lookahead on "/" prevents
+    # this from firing on VW/Audi pages where "Exterior color" is
+    # followed by " / Paint Code". Anchored on "Exterior" so we don't
+    # pick up "Interior color".
+    re.compile(
+        r"Exterior\s*colou?r(?!\s*/)\s*[:\n\t ]+\s*([A-Z0-9]{2,8})\b",
+        re.I,
+    ),
     # BMW/MINI: "Color\nSTERLINGGRAU (472)" — code in parens after the
     # colour name. Label is just "Color" / "Colour" / "Farbe" with no
     # trailing "Code". The colour-name run may include letters, digits,
