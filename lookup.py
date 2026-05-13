@@ -943,6 +943,23 @@ VIN_NOT_FOUND_PHRASES = (
 )
 
 
+# When wait_for_vehicle_data times out we'd normally treat that as
+# "page didn't load". But some result pages genuinely don't have any
+# paint info at all (e.g. older PSA vehicles where the catalogue knows
+# the model but only has "PAINT TYPE", not "BODY COLOUR"). In those
+# cases the page IS loaded, just without anything our paint patterns
+# can match — so we should report "paint code not found" rather than
+# the misleading "vehicle data did not load (timeout)" error. This
+# regex detects the page-loaded state via field labels that appear on
+# the result page regardless of whether paint info is present.
+PAGE_LOADED_NEEDLE = re.compile(
+    r"Vehicle\s*Identification\s*No\.?|"   # the VIN field label (not the heading)
+    r"PAINT\s*TYPE|"                       # PSA pages without BODY COLOUR
+    r"COMMERCIAL\s*MARQUE",                # PSA generic field
+    re.I,
+)
+
+
 def collect_all_text(page: Page) -> str:
     parts = []
     for fr in page.frames:
@@ -960,6 +977,7 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
     # (one frame-text pull + a couple of regex matches); the wall-clock
     # win on fast pages is worth the small extra CPU.
     interval = 300
+    text = ""
     while waited < timeout_ms:
         text = collect_all_text(page)
         lower = text.lower()
@@ -969,6 +987,12 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
             return text
         page.wait_for_timeout(interval)
         waited += interval
+    # Timed out waiting for paint info. If the page nonetheless looks
+    # like a fully-loaded vehicle-data page (some PSA vehicles have no
+    # BODY COLOUR row at all), return what we have so we surface the
+    # honest "paint code not found" error rather than "timeout".
+    if text and PAGE_LOADED_NEEDLE.search(text):
+        return text
     return None
 
 
