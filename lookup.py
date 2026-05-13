@@ -153,6 +153,32 @@ COMMERCIAL_REROUTING: dict[str, dict[str, str]] = {
     },
 }
 
+# Per Matt at LexCom (partslink24 UK support, May 2026): there is no
+# year-based rule for whether a VIN belongs in a brand's modern vs
+# Classic catalogue — it's whether the model is still in production.
+# Since we can't tell that upfront from VIN/make/year alone, we treat
+# Classic as a fallback: if the main (or commercial) catalogue fails to
+# find the vehicle, retry against the Classic sibling before giving up
+# to the dashboard.
+#
+# The map's keys cover BOTH the base brand and its commercial siblings,
+# so that an N1 Sprinter routed to Mercedes-Benz Vans, when not found,
+# still falls back to Mercedes-Benz Classic. Whether Classic actually
+# carries old commercial vehicles is something we'll learn from real
+# lookups — if it doesn't, the request fails fast and we move on.
+CLASSIC_SIBLING: dict[str, str] = {
+    "BMW":                              "BMW Classic",
+    "BMW Motorrad":                     "BMW Motorrad Classic",
+    "Mercedes-Benz":                    "Mercedes-Benz Classic",
+    "Mercedes-Benz Vans":               "Mercedes-Benz Classic",
+    "Mercedes-Benz Trucks":             "Mercedes-Benz Classic",
+    "Mercedes-Benz Unimog":             "Mercedes-Benz Classic",
+    "MINI":                             "MINI Classic",
+    "Porsche":                          "Porsche Classic",
+    "Volkswagen":                       "Volkswagen Classic",
+    "Volkswagen Commercial Vehicles":   "Volkswagen Classic",
+}
+
 # Brand -> partslink24 catalog service id (from launchCatalog.do?service=…).
 # Verified against partslink24's brand-selection grid on the home page.
 BRAND_CATALOG_SERVICE: dict[str, str] = {
@@ -764,6 +790,32 @@ PAINT_CODE_PATTERNS = [
         r"Exterior\s*colou?r(?!\s*/)\s*[:\n\t ]+\s*([A-Z0-9]{2,8})\b",
         re.I,
     ),
+    # Vauxhall (Opel): "Color Option\tGAZ" or "Color Option\tGAZ (40R)".
+    # The code is the bare token after the label; we don't capture the
+    # parenthesised sub-code that sometimes follows.
+    re.compile(
+        r"Color\s*Option\s*[:\n\t ]+\s*([A-Z0-9]{2,8})\b",
+        re.I,
+    ),
+    # Fiat / Alfa Romeo / Abarth / Jeep (Stellantis Italian side):
+    # "COLEST\n679\nCOLORE ESTERNO (Siva metalik) (679)"
+    # The code is on the line immediately after the COLEST label.
+    # COLINT (interior) has the same shape but a distinct label.
+    re.compile(
+        r"COLEST\s*\n\s*([A-Z0-9]{2,8})\b",
+        re.I,
+    ),
+    # Land Rover (newer models): "Paint Exterior Body Colour\nEiger grey-JBC2409".
+    # Code is the suffix after the final dash. Anchored to [A-Z]{2,}\d{2,}
+    # to require both letters and digits — keeps us from matching things
+    # like "Java Black" (older LR, no code) or "Exterior Paint - Caesium
+    # Blue" (Jaguar uses the same label but with a leading dash sub-
+    # format that doesn't include a real code).
+    re.compile(
+        r"Paint\s*Exterior\s*Body\s*Colou?r\s*\n\s*"
+        r".+?-([A-Z]{2,}\d{2,})\b",
+        re.I,
+    ),
     # BMW/MINI: "Color\nSTERLINGGRAU (472)" — code in parens after the
     # colour name. Label is just "Color" / "Colour" / "Farbe" with no
     # trailing "Code". The colour-name run may include letters, digits,
@@ -794,11 +846,13 @@ PAINT_CODE_PATTERNS = [
 ]
 
 # Captures the human-readable colour name where the page provides one.
-# Two formats currently known:
-#  - BMW/MINI: "Color\nSTERLINGGRAU (472)" -> "STERLINGGRAU"
-#  - PSA:     "BODY COLOUR\nEVL - PLATINUM GREY PAINT" -> "PLATINUM GREY"
-# VW/Audi don't include a colour name in their paint row, so this returns
-# "" for those.
+# Known formats:
+#  - BMW/MINI:    "Color\nSTERLINGGRAU (472)" -> "STERLINGGRAU"
+#  - PSA:         "BODY COLOUR\nEVL - PLATINUM GREY PAINT" -> "PLATINUM GREY"
+#  - Fiat family: "COLEST\n679\nCOLORE ESTERNO (Siva metalik) (679)" -> "Siva metalik"
+#  - Land Rover:  "Paint Exterior Body Colour\nEiger grey-JBC2409" -> "Eiger grey"
+# VW/Audi and Nissan/Vauxhall don't include a colour name in their paint
+# row, so this returns "" for those.
 PAINT_DESCRIPTION_PATTERNS = [
     # BMW/MINI format
     re.compile(
@@ -813,6 +867,23 @@ PAINT_DESCRIPTION_PATTERNS = [
         r"[A-Z0-9]{2,6}\s*-\s*"
         r"(.+?)"                                # the colour name
         r"\s+PAINT\b",
+        re.I,
+    ),
+    # Fiat family: "COLEST\nCODE\nCOLORE ESTERNO (name) (code)"
+    # Jeep uses "EXTERNAL COLOR (code)" with no inner-parens name, so the
+    # inner group is optional. When Jeep matches, group(1) is None — the
+    # extraction function below returns "" for that.
+    re.compile(
+        r"COLEST\s*\n\s*[A-Z0-9]{2,8}\s*\n\s*"
+        r"(?:COLORE\s*ESTERNO|EXTERNAL\s*COLOR)\s*"
+        r"(?:\((.+?)\)\s*)?"
+        r"\(\s*[A-Z0-9]{2,8}\s*\)",
+        re.I,
+    ),
+    # Land Rover format
+    re.compile(
+        r"Paint\s*Exterior\s*Body\s*Colou?r\s*\n\s*"
+        r"(.+?)-[A-Z]{2,}\d{2,}\b",
         re.I,
     ),
 ]
@@ -878,11 +949,12 @@ def extract_paint_code(text: str) -> str:
 def extract_paint_description(text: str) -> str:
     """Extract the human-readable colour name (e.g. "STERLINGGRAU") and
     return it Title Cased ("Sterlinggrau"). Returns "" if no description
-    is on the page (e.g. VW/Audi don't include one in the paint row)."""
+    is on the page (e.g. VW/Audi don't include one in the paint row, and
+    Jeep's COLEST row has the code but no inner-parens name)."""
     for pat in PAINT_DESCRIPTION_PATTERNS:
         m = pat.search(text)
         if m:
-            return m.group(1).strip().title()
+            return m.group(1).strip().title() if m.group(1) else ""
     return ""
 
 
@@ -1016,6 +1088,24 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
             return result
         catalog_error = err
         log(f"catalog attempt failed: {err}")
+
+        # Classic-sibling retry: many partslink24 brands have a separate
+        # Classic catalogue for out-of-production models. We can't tell
+        # upfront which side a VIN belongs to (see comment on
+        # CLASSIC_SIBLING), so we try the modern catalogue first and
+        # fall back to Classic only if it failed.
+        classic = CLASSIC_SIBLING.get(brand)
+        if classic and classic in BRAND_CATALOG_SERVICE:
+            log(f"trying Classic sibling: {classic}")
+            # Reset any partial extraction from the failed attempt.
+            result.paint_code = ""
+            result.paint_description = ""
+            ok, err = _try_catalog(page, row.vin, classic, result, debug)
+            if ok:
+                result.via = "catalog"
+                return result
+            log(f"Classic sibling failed: {err}")
+            catalog_error = f"{catalog_error}; {classic}: {err}"
     else:
         # No brand resolvable, or brand has no catalog. Fall through to
         # the dashboard if allowed.
