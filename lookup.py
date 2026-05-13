@@ -889,15 +889,24 @@ PAINT_DESCRIPTION_PATTERNS = [
 ]
 
 VEHICLE_DATA_NEEDLE = re.compile(
-    # Catch:
-    #  - "Paint Code" / "Lackcode" / "Farbcode" labels (VW/Audi/MB/etc.)
-    #  - "Colour Code" / "Color Code" labels
-    #  - bare "Color"/"Colour"/"Farbe" with a parenthesised code (BMW/MINI)
-    #  - "BODY COLOUR" label (PSA)
-    #  - the catalog-page heading "Vehicle Identification"
-    r"Paint\s*Code|Lackcode|Farbcode|Colou?r\s*Code|BODY\s*COLOU?R|"
-    r"(?:Colou?r|Farbe)\s*\n\s*[A-Z0-9][A-Z0-9 \-/]*\(\s*[A-Z0-9]{2,8}\s*\)|"
-    r"Vehicle Identification",
+    # We use this regex to decide "has the result page finished loading
+    # the data we care about". It must match ONLY when a paint-code-
+    # bearing field is actually on the page — NOT just a page heading
+    # like "Vehicle Identification", because partslink24's older popups
+    # (Nissan/Vauxhall/Stellantis/Ford/etc.) render the heading first
+    # and the body content a second or two later, and exiting the poll
+    # loop on the heading caused intermittent false negatives ("paint
+    # code not found").
+    #
+    # Patterns below mirror PAINT_CODE_PATTERNS — when any matches, we
+    # can confidently extract from the page.
+    r"Paint\s*Code|Lackcode|Farbcode|Colou?r\s*Code|"
+    r"BODY\s*COLOU?R|"                     # PSA
+    r"COLEST|"                             # Fiat / Stellantis Italian side
+    r"Color\s*Option|"                     # Vauxhall
+    r"Paint\s*Exterior\s*Body\s*Colou?r|"  # Land Rover / Jaguar
+    r"Exterior\s*colou?r\s*[/:\n\t ]|"     # VW / Nissan / Toyota / Lexus
+    r"(?:Colou?r|Farbe)\s*\n\s*[A-Z0-9][A-Z0-9 \-/]*\(\s*[A-Z0-9]{2,8}\s*\)",
     re.I,
 )
 
@@ -925,7 +934,11 @@ def collect_all_text(page: Page) -> str:
 
 def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
     waited = 0
-    interval = 750
+    # Tight polling (300ms) so we detect the data within ~300ms of when
+    # the page is actually ready. The check inside the loop is cheap
+    # (one frame-text pull + a couple of regex matches); the wall-clock
+    # win on fast pages is worth the small extra CPU.
+    interval = 300
     while waited < timeout_ms:
         text = collect_all_text(page)
         lower = text.lower()
@@ -1117,6 +1130,22 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
 
     if not allow_dashboard_fallback:
         result.error = catalog_error or "lookup failed"
+        return result
+
+    # Skip the dashboard fallback when partslink24 returned the vehicle
+    # data but had no paint code on it (Jaguar, Ford, Kia, Hyundai, MAN,
+    # IVECO — partslink24 just doesn't carry their codes). The dashboard
+    # would return the same page from the same database and the same
+    # extractors would fail again. ~10s saved per affected lookup.
+    #
+    # We still try the dashboard for genuine "VIN not found" errors:
+    # those CAN succeed via the dashboard's universal search if VDG gave
+    # us the wrong make (e.g. a re-badged or imported vehicle filed
+    # under a different brand on partslink24).
+    if catalog_error and "paint code not found" in catalog_error:
+        log("skipping dashboard fallback "
+            "(catalog returned data but no paint code)")
+        result.error = catalog_error
         return result
 
     log(f"trying dashboard fallback for {row.vin}")
