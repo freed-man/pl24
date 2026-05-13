@@ -892,6 +892,21 @@ PAINT_DESCRIPTION_PATTERNS = [
         r"(.+?)-[A-Z]{2,}\d{2,}\b",
         re.I,
     ),
+    # Jaguar and older Land Rover (Defender etc.): the "Paint Exterior
+    # Body Colour" label is present but the value is just a colour name
+    # with no extractable code — Jaguar uses "Exterior Paint - Caesium
+    # Blue", older LR just "Java Black". Capturing the name into the
+    # description column means coloureg can at least show users the
+    # colour even when partslink24 has no code. paint_code stays empty.
+    # Negative lookahead excludes the newer-LR "<name>-<CODE>" form so
+    # this only fires when there isn't a real code.
+    re.compile(
+        r"Paint\s*Exterior\s*Body\s*Colou?r\s*\n\s*"
+        r"(?!.+?-[A-Z]{2,}\d{2,}\b)"
+        r"(?:Exterior\s*Paint\s*-\s*)?"
+        r"([^\n]+?)\s*$",
+        re.I | re.M,
+    ),
 ]
 
 VEHICLE_DATA_NEEDLE = re.compile(
