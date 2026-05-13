@@ -831,9 +831,15 @@ PAINT_CODE_PATTERNS = [
     # always ends with " PAINT". Anchor on both the specific "BODY
     # COLOUR" label (so we don't match "UPHOLSTERY COLOUR" etc.) and the
     # trailing "PAINT" word so we don't run into the next row.
+    #
+    # Separator between label and value can be \n, \t or run of spaces —
+    # depends on how Playwright's text extractor renders the PSA popup's
+    # table cells. Two-tone paint (e.g. DS) shows as "EZR/EXY - ..." so
+    # we capture only the first code and ignore an optional /SECOND.
     re.compile(
-        r"BODY\s*COLOU?R\s*\n\s*"
-        r"([A-Z0-9]{2,6})"            # the code
+        r"BODY\s*COLOU?R\s*[:\n\t ]+\s*"
+        r"([A-Z0-9]{2,6})"            # primary code
+        r"(?:/[A-Z0-9]{2,6})?"        # optional second code (two-tone)
         r"\s*-\s*"
         r".+?"                        # the name (consumed but not captured here)
         r"\s+PAINT\b",
@@ -861,10 +867,10 @@ PAINT_DESCRIPTION_PATTERNS = [
         r"\s*\(\s*[A-Z0-9]{2,8}\s*\)",          # immediately followed by (code)
         re.I,
     ),
-    # PSA format
+    # PSA format (see paint-code pattern for separator/two-tone notes)
     re.compile(
-        r"BODY\s*COLOU?R\s*\n\s*"
-        r"[A-Z0-9]{2,6}\s*-\s*"
+        r"BODY\s*COLOU?R\s*[:\n\t ]+\s*"
+        r"[A-Z0-9]{2,6}(?:/[A-Z0-9]{2,6})?\s*-\s*"
         r"(.+?)"                                # the colour name
         r"\s+PAINT\b",
         re.I,
