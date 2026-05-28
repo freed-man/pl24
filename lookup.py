@@ -153,6 +153,24 @@ COMMERCIAL_REROUTING: dict[str, dict[str, str]] = {
     },
 }
 
+# Mercedes is the only brand where the EU category picks between two
+# different commercial catalogues — N1 -> Vans, N2/N3 -> Trucks. But the
+# N1/N2/N3 boundary is genuinely fuzzy: GVW can't be reliably derived
+# from a VIN, and a 3.5t van vs a 3.5t-plus light truck sit right on the
+# line, so VDG's category occasionally puts a Mercedes on the wrong side.
+# When the routed commercial catalogue fails, try the sibling commercial
+# catalogue before falling through to Classic/dashboard. This only fires
+# for Mercedes commercials and only on failure, so correctly-routed
+# lookups pay nothing.
+#
+# VW and Ford don't need this (single commercial catalogue each). MAN
+# and IVECO don't need it either — they're standalone heavy-truck
+# catalogues with no category-dependent routing.
+COMMERCIAL_FALLBACK: dict[str, str] = {
+    "Mercedes-Benz Vans":   "Mercedes-Benz Trucks",
+    "Mercedes-Benz Trucks": "Mercedes-Benz Vans",
+}
+
 # Per Matt at LexCom (partslink24 UK support, May 2026): there is no
 # year-based rule for whether a VIN belongs in a brand's modern vs
 # Classic catalogue — it's whether the model is still in production.
@@ -245,15 +263,6 @@ def normalise_make(make: str | None) -> str | None:
     if not make:
         return None
     return make.strip().lower() or None
-
-
-def normalise_category(category: str | None) -> str | None:
-    """Lowercase and strip; empty -> None. We accept M1/N1/N2/N3 etc.
-    in any case, plus simple words like 'passenger' / 'commercial'."""
-    if not category:
-        return None
-    c = category.strip().lower()
-    return c or None
 
 
 def is_commercial_category(category: str | None) -> str | None:
@@ -715,19 +724,32 @@ def _wait_for_editable(box, timeout_ms: int) -> bool:
     return False
 
 
-def submit_vin_in_catalog(catalog: Page, vin: str) -> tuple[bool, str | None]:
-    """Wait for the catalog's VIN input and submit the VIN.
+def submit_vin(page: Page, vin: str, *, source: str) -> tuple[bool, str | None]:
+    """Find the VIN input on the page and submit `vin`.
 
-    Two failure modes we handle:
-      - 'VIN box not visible' — input never rendered at all in 10s.
-      - 'VIN box visible but never became editable' — input rendered
-        but stayed disabled. Failing fast on the editable check is much
-        better than letting Playwright's fill() hang for its 30s default.
+    Used for both the brand catalog tabs and the dashboard. Their VIN
+    boxes differ only in placeholder text — catalog uses 'Direct entry' /
+    'Direkteingabe' / 'VIN' / 'FIN', dashboard uses 'SEARCH VIN' / 'VIN' —
+    so the selector below accepts any of them; in practice only one box is
+    present on each page.
+
+    `source` is "catalog" or "dashboard" and only changes the error
+    wording so log lines stay readable.
+
+    Failure modes:
+      - '<box> not visible' — input never rendered in 10s.
+      - '<box> never became editable' — input rendered but stayed
+        disabled. Failing fast here beats letting Playwright's fill()
+        hang for its 30s default.
 
     Returns (True, None) on success, or (False, reason) on failure."""
-    box = catalog.locator(
+    box_name = "SEARCH VIN box" if source == "dashboard" else "VIN box"
+    editable_suffix = ("never became editable" if source == "dashboard"
+                       else "visible but never became editable")
+    box = page.locator(
         'input[placeholder*="Direct entry" i], '
         'input[placeholder*="Direkteingabe" i], '
+        'input[placeholder*="SEARCH VIN" i], '
         'input[placeholder*="VIN" i], '
         'input[placeholder*="FIN" i], '
         'input[name*="vin" i], '
@@ -736,39 +758,14 @@ def submit_vin_in_catalog(catalog: Page, vin: str) -> tuple[bool, str | None]:
     try:
         box.wait_for(state="visible", timeout=10_000)
     except PlaywrightTimeoutError:
-        return False, "VIN box not visible"
+        return False, f"{box_name} not visible"
     if not _wait_for_editable(box, timeout_ms=10_000):
-        return False, "VIN box visible but never became editable"
+        return False, f"{box_name} {editable_suffix}"
     try:
         box.fill(vin, timeout=5_000)
         box.press("Enter")
     except PlaywrightTimeoutError:
-        return False, "VIN box fill timed out"
-    return True, None
-
-
-# ---------- dashboard SEARCH VIN fallback -----------------------------------
-
-def submit_vin_on_dashboard(page: Page, vin: str) -> tuple[bool, str | None]:
-    """Find the dashboard's SEARCH VIN box and submit the VIN.
-    Returns (True, None) on success, or (False, reason) on failure."""
-    box = page.locator(
-        'input[placeholder*="SEARCH VIN" i], '
-        'input[placeholder*="VIN" i], '
-        'input[name*="vin" i], '
-        'input[name*="fin" i]'
-    ).first
-    try:
-        box.wait_for(state="visible", timeout=10_000)
-    except PlaywrightTimeoutError:
-        return False, "SEARCH VIN box not visible"
-    if not _wait_for_editable(box, timeout_ms=10_000):
-        return False, "SEARCH VIN box never became editable"
-    try:
-        box.fill(vin, timeout=5_000)
-        box.press("Enter")
-    except PlaywrightTimeoutError:
-        return False, "SEARCH VIN box fill timed out"
+        return False, f"{box_name} fill timed out"
     return True, None
 
 
@@ -845,10 +842,11 @@ PAINT_CODE_PATTERNS = [
         r"\s+PAINT\b",
         re.I,
     ),
-    re.compile(r"Paint\s*Code\s*[:\n]\s*([A-Z0-9]{2,8})", re.I),
-    re.compile(r"Colou?r\s*Code\s*[:\n]\s*([A-Z0-9]{2,8})", re.I),
-    re.compile(r"Farbcode\s*[:\n]\s*([A-Z0-9]{2,8})", re.I),
-    re.compile(r"Lackcode\s*[:\n]\s*([A-Z0-9]{2,8})", re.I),
+    re.compile(
+        r"(?:Paint\s*Code|Colou?r\s*Code|Farbcode|Lackcode)"
+        r"\s*[:\n]\s*([A-Z0-9]{2,8})",
+        re.I,
+    ),
 ]
 
 # Captures the human-readable colour name where the page provides one.
@@ -1041,6 +1039,45 @@ def _populate_from_text(result: LookupResult, text: str) -> None:
     result.paint_description = extract_paint_description(text)
 
 
+def _process_result_page(page: Page, vin: str, result: LookupResult,
+                        debug: bool, *,
+                        debug_suffix: str = "",
+                        error_prefix: str = "",
+                        timeout_msg: str = "vehicle data did not load (timeout)",
+                        no_paint_msg: str = "paint code not found on result page",
+                        ) -> tuple[bool, str | None]:
+    """Wait for the post-submit result page, then extract the paint code.
+
+    Shared by _try_catalog and _try_dashboard: both submit a VIN, wait
+    for the same kind of vehicle-data page, run the same extractors, and
+    have the same three failure modes (timeout, vin-not-found, no paint
+    code). Differences are confined to the debug-filename suffix and the
+    exact error wording, passed via kwargs so each caller keeps the same
+    strings it produced before (historical results.csv rows depend on
+    that wording).
+
+    Returns (True, None) on success or (False, reason) on failure."""
+    def dump():
+        if debug:
+            dump_debug(page, vin + debug_suffix)
+
+    text = wait_for_vehicle_data(page, timeout_ms=10_000)
+    if text is None:
+        dump()
+        return False, f"{error_prefix}{timeout_msg}"
+
+    err = vin_error_in_text(text)
+    if err:
+        dump()
+        return False, f"{error_prefix}{err}"
+
+    _populate_from_text(result, text)
+    if not result.paint_code:
+        dump()
+        return False, f"{error_prefix}{no_paint_msg}"
+    return True, None
+
+
 def _try_catalog(page: Page, vin: str, brand: str, result: LookupResult,
                  debug: bool) -> tuple[bool, str | None]:
     """Open the brand catalog and submit the VIN. Returns
@@ -1053,31 +1090,14 @@ def _try_catalog(page: Page, vin: str, brand: str, result: LookupResult,
         return False, "could not open catalog after re-login"
 
     try:
-        ok, err = submit_vin_in_catalog(catalog, vin)
+        ok, err = submit_vin(catalog, vin, source="catalog")
         if not ok:
             if debug:
                 dump_debug(catalog, vin)
             return False, f"{err} ({brand} catalog)"
 
-        log(f"VIN submitted, waiting up to 10s for vehicle data")
-        text = wait_for_vehicle_data(catalog, timeout_ms=10_000)
-        if text is None:
-            if debug:
-                dump_debug(catalog, vin)
-            return False, "vehicle data did not load (timeout)"
-
-        err = vin_error_in_text(text)
-        if err:
-            if debug:
-                dump_debug(catalog, vin)
-            return False, err
-
-        _populate_from_text(result, text)
-        if not result.paint_code:
-            if debug:
-                dump_debug(catalog, vin)
-            return False, "paint code not found on result page"
-        return True, None
+        log("VIN submitted, waiting up to 10s for vehicle data")
+        return _process_result_page(catalog, vin, result, debug)
     finally:
         try:
             catalog.close()
@@ -1100,31 +1120,20 @@ def _try_dashboard(page: Page, vin: str, result: LookupResult,
         log("dashboard fallback: attention page shown, re-logging in")
         login(page)
 
-    ok, err = submit_vin_on_dashboard(page, vin)
+    ok, err = submit_vin(page, vin, source="dashboard")
     if not ok:
         if debug:
             dump_debug(page, vin + "_dashboard")
         return False, f"dashboard fallback: {err}"
 
-    log(f"dashboard VIN submitted, waiting up to 10s for vehicle data")
-    text = wait_for_vehicle_data(page, timeout_ms=10_000)
-    if text is None:
-        if debug:
-            dump_debug(page, vin + "_dashboard")
-        return False, "dashboard fallback: vehicle data did not load"
-
-    err = vin_error_in_text(text)
-    if err:
-        if debug:
-            dump_debug(page, vin + "_dashboard")
-        return False, f"dashboard fallback: {err}"
-
-    _populate_from_text(result, text)
-    if not result.paint_code:
-        if debug:
-            dump_debug(page, vin + "_dashboard")
-        return False, "dashboard fallback: paint code not found"
-    return True, None
+    log("dashboard VIN submitted, waiting up to 10s for vehicle data")
+    return _process_result_page(
+        page, vin, result, debug,
+        debug_suffix="_dashboard",
+        error_prefix="dashboard fallback: ",
+        timeout_msg="vehicle data did not load",
+        no_paint_msg="paint code not found",
+    )
 
 
 def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
@@ -1146,6 +1155,30 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
             return result
         catalog_error = err
         log(f"catalog attempt failed: {err}")
+
+        # Commercial-sibling retry: for a Mercedes commercial vehicle the
+        # routed catalogue (Vans or Trucks) may be wrong because the
+        # N1/N2/N3 category can't be reliably derived from the VIN. Try
+        # the sibling commercial catalogue before anything else. Skipped
+        # for "paint code not found" (the page DID load — wrong category
+        # would have failed with "vehicle not found" instead, so a
+        # paint-not-found here means the right catalogue but no code).
+        sibling = COMMERCIAL_FALLBACK.get(brand)
+        if (sibling and sibling in BRAND_CATALOG_SERVICE
+                and "paint code not found" not in (err or "")):
+            log(f"trying commercial sibling: {sibling}")
+            result.paint_code = ""
+            result.paint_description = ""
+            ok, err2 = _try_catalog(page, row.vin, sibling, result, debug)
+            if ok:
+                result.via = "catalog"
+                return result
+            log(f"commercial sibling failed: {err2}")
+            catalog_error = f"{catalog_error}; {sibling}: {err2}"
+            # If the sibling resolved the brand family, prefer Classic
+            # fallback for the sibling too (covered by CLASSIC_SIBLING
+            # which already maps both Vans and Trucks to MB Classic).
+            brand = sibling
 
         # Classic-sibling retry: many partslink24 brands have a separate
         # Classic catalogue for out-of-production models. We can't tell
