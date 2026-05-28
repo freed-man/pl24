@@ -918,6 +918,20 @@ PAINT_DESCRIPTION_PATTERNS = [
         r"([^\n]+?)\s*$",
         re.I | re.M,
     ),
+    # Volvo / Polestar: paint info rendered as two rows in the popup —
+    # left cell has the 5-digit catalogue code (e.g. "49800"), right
+    # cell has the 3-digit commercial code plus the colour name (e.g.
+    # "498 Caspian Blue"). We pick up the description from the right
+    # cell. Anchored on the "<3-digit code> <name>" shape so it doesn't
+    # false-match the Nissan/Toyota/Lexus/Vauxhall variants that have
+    # the same "Exterior color" label but no separate name field.
+    re.compile(
+        r"Exterior\s*colou?r\s*[:\n\t ]+"
+        r"\d{3}\s+"                       # the 3-digit commercial code
+        r"([A-Za-z][A-Za-z0-9 \-/]+?)"    # the colour name
+        r"(?:\n|\t|$)",
+        re.I,
+    ),
 ]
 
 VEHICLE_DATA_NEEDLE = re.compile(
