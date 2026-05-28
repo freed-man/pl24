@@ -1075,6 +1075,74 @@ class LookupResult:
     paint_description: str = ""
     via: str = ""       # "catalog", "dashboard", or "" on failure
     error: str = ""
+    outcome: str = ""   # categorised classification, set by categorise()
+
+
+# Fixed vocabulary of outcome categories. Used for triage and analysis —
+# the human-readable `error` column stays as-is for debugging, this is
+# the machine-parseable companion for filtering results.csv. Adding a
+# new category requires updating both this set and `categorise()` below.
+OUTCOMES = frozenset({
+    "success",            # paint code was extracted
+    "name_only",          # description captured but no code (Jaguar, old LR)
+    "not_in_database",    # partslink24 doesn't have this VIN
+    "unsupported_brand",  # make not in MAKE_TO_BRAND (Honda, Maserati, etc.)
+    "page_load_timeout",  # catalog/dashboard never loaded the vehicle data
+    "paint_data_missing", # page loaded but no paint info (old PSA, etc.)
+    "catalog_ui_error",   # VIN box never visible/editable
+    "auth_error",         # login/session failure
+    "missing_input",      # no make supplied in lookups.txt
+    "unknown",            # anything not yet categorised
+})
+
+
+def categorise(result: "LookupResult") -> str:
+    """Classify a finished lookup into one of OUTCOMES.
+
+    Pure function of the final-state fields. The ordering of checks
+    matters: more specific/authoritative signals are checked first.
+    Notably, the dashboard's 'could not be assigned' verdict is treated
+    as authoritative even if an upstream catalog timed out — that's the
+    final word on whether partslink24 knows the VIN.
+    """
+    if result.paint_code:
+        return "success"
+
+    err = (result.error or "").lower()
+
+    # Most specific signals first
+    if "unknown make" in err:
+        return "unsupported_brand"
+    if "no make supplied" in err:
+        return "missing_input"
+    if "login failed" in err or "could not open catalog after re-login" in err:
+        return "auth_error"
+
+    # Paint-code-not-found path: differentiate "vehicle has a colour name
+    # but no code" (Jaguar/old LR) from "page loaded with no paint info at
+    # all" (old PSA)
+    if "paint code not found" in err:
+        if result.paint_description:
+            return "name_only"
+        return "paint_data_missing"
+
+    # Authoritative "not in database" markers — checked before timeouts
+    # because dashboard's verdict overrides an upstream catalog timeout
+    if any(p in err for p in (
+        "could not be assigned",
+        "vehicle not found", "no vehicle found", "no data found",
+        "vin invalid", "invalid vin",
+        "kein fahrzeug", "nicht gefunden",
+    )):
+        return "not_in_database"
+
+    if "did not load" in err or "timeout" in err:
+        return "page_load_timeout"
+
+    if "vin box" in err or "search vin" in err:
+        return "catalog_ui_error"
+
+    return "unknown"
 
 
 def _populate_from_text(result: LookupResult, text: str) -> None:
@@ -1313,12 +1381,14 @@ def lookup_vin_with_retry(page: Page, row: LookupRow, debug: bool,
             was_exception = True
 
         if r.paint_code or not was_exception:
+            r.outcome = categorise(r)
             return r
 
         if attempt < MAX_RETRIES:
             log(f"retrying {row.vin} "
                 f"(attempt {attempt + 2}/{MAX_RETRIES + 1})")
             page.wait_for_timeout(1500)
+    r.outcome = categorise(r)
     return r
 
 
@@ -1361,6 +1431,7 @@ def write_results(results: list[LookupResult]) -> None:
         ("paint_code",        "Paint code"),
         ("paint_description", "Paint description"),
         ("via",               "Via"),
+        ("outcome",           "Outcome"),
         ("error",             "Error"),
     ]
     headers = [h for _, h in columns]
@@ -1525,11 +1596,13 @@ def main() -> None:
 
     write_results(results)
     print()
-    print(f"{'VIN':<19} {'PAINT':<8} {'DESCRIPTION':<28} {'VIA':<10} ERROR")
-    print("-" * 105)
+    print(f"{'VIN':<19} {'PAINT':<8} {'DESCRIPTION':<28} "
+          f"{'VIA':<10} {'OUTCOME':<19} ERROR")
+    print("-" * 124)
     for r in results:
         print(f"{r.vin:<19} {r.paint_code:<8} "
-              f"{r.paint_description[:28]:<28} {r.via:<10} {r.error}")
+              f"{r.paint_description[:28]:<28} {r.via:<10} "
+              f"{r.outcome:<19} {r.error}")
     print(f"\nappended to {RESULTS_FILE.name}")
 
 
