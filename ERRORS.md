@@ -3,6 +3,45 @@
 Catalogue of every error string the script can write to the `Error`
 column of `results.csv`, what each means, and how to fix or triage it.
 
+## Brands not carried by partslink24
+
+The following brands appear in vehicle data sources (DVLA, VDG, etc.)
+but are **not advertised on partslink24's brand-selection page**, so the
+script has no catalogue to route to. They will always fall through to
+the dashboard, which also won't find them. Don't bother retrying —
+these need different data sources entirely (physical colour label,
+paint factor database, manufacturer dealer system, etc.).
+
+- **Honda**
+- **Maserati**
+- **Subaru**
+- **Tesla**
+- **Isuzu**
+- **Lotus**
+- **Genesis**
+
+For these you'll see `unknown make 'X'; dashboard fallback: could not
+be assigned to a distinct model`. That's the script behaving correctly,
+not a bug.
+
+## Brands where partslink24 has the vehicle but no paint code
+
+Different from above: partslink24 *does* carry these brands and
+recognises the VIN, but its data doesn't include the manufacturer paint
+code — only the colour name. The script captures the name into the
+description column where it can, but `paint_code` stays empty.
+
+- **Jaguar** — shows "Exterior Paint - <Name>" (e.g. "Caesium Blue")
+- **Ford** — passenger car catalogues only show the colour name
+- **Kia** — shows colour name in `Exterior color` field
+- **Hyundai** — same as Kia
+
+Common error for these: `paint code not found on result page`. The
+dashboard fallback is automatically skipped because the catalog already
+found the vehicle — same database, same outcome, no point retrying.
+
+---
+
 ## Quick triage
 
 | If you see... | It means... | Fix |
@@ -215,7 +254,8 @@ what went wrong.
   This adds:
   - Visible browser window (so you can watch what's happening)
   - HTML and screenshot dumps in `_debug/<vin>.{html,png}` on failure
-  - 30-second pause at the end so you can inspect the final state
+  - `_debug/` is wiped at the start of each `--debug` run, so artifacts
+    accumulate over a single batch but don't carry between runs
 - For login problems specifically, `--fresh` ignores the saved session
   and starts clean — useful when `storage_state.json` is masking a
   problem.
