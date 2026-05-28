@@ -90,6 +90,7 @@ MAKE_TO_BRAND: dict[str, str] = {
     "audi":           "Audi",
     "bentley":        "Bentley",
     "bmw":            "BMW",
+    "bmw motorrad":   "BMW Motorrad",
     "citroen":        "Citroën",
     "citroën":        "Citroën",
     "cupra":          "Cupra",
@@ -146,6 +147,11 @@ COMMERCIAL_REROUTING: dict[str, dict[str, str]] = {
         "N2": "Ford Commercial",
         "N3": "Ford Commercial",
     },
+    "Fiat": {
+        "N1": "Fiat Professional",
+        "N2": "Fiat Professional",
+        "N3": "Fiat Professional",
+    },
     "Mercedes-Benz": {
         "N1": "Mercedes-Benz Vans",
         "N2": "Mercedes-Benz Trucks",
@@ -169,6 +175,13 @@ COMMERCIAL_REROUTING: dict[str, dict[str, str]] = {
 COMMERCIAL_FALLBACK: dict[str, str] = {
     "Mercedes-Benz Vans":   "Mercedes-Benz Trucks",
     "Mercedes-Benz Trucks": "Mercedes-Benz Vans",
+    # Mirror the Mercedes-style cross-fallback for Fiat: passenger vs
+    # commercial Fiats live in separate catalogues, and the M1/N1
+    # boundary for a Doblò or Panda Van is just as fuzzy as Mercedes's
+    # van/truck line. If the routed catalogue doesn't recognise the VIN,
+    # try the sibling before falling through to dashboard.
+    "Fiat":                 "Fiat Professional",
+    "Fiat Professional":    "Fiat",
 }
 
 # Per Matt at LexCom (partslink24 UK support, May 2026): there is no
@@ -998,8 +1011,24 @@ def extract_paint_code(text: str) -> str:
     for pat in PAINT_CODE_PATTERNS:
         m = pat.search(text)
         if m:
-            return m.group(1).upper()
+            return _normalise_code(m.group(1).upper())
     return ""
+
+
+def _normalise_code(code: str) -> str:
+    """Post-process a raw extracted paint code.
+
+    Volvo/Polestar pages show paint codes as 5-digit values padded with
+    "00" (e.g. "49000", "71200", "71900"). The actual commercial code
+    paint suppliers use is the 3-digit prefix ("490", "712", "719"). We
+    trim only when the value is exactly 5 digits and ends in "00" — a
+    pattern that as far as we've observed is unique to Volvo's catalogue
+    format. Any other shape (alphanumeric like "A7W", 3-digit like
+    "955", longer like "JBC2409") is returned unchanged.
+    """
+    if len(code) == 5 and code.isdigit() and code.endswith("00"):
+        return code[:3]
+    return code
 
 
 def extract_paint_description(text: str) -> str:
