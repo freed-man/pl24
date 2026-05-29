@@ -273,9 +273,19 @@ def log(msg: str) -> None:
 
 
 def normalise_make(make: str | None) -> str | None:
+    """Normalise a make string for MAKE_TO_BRAND lookup.
+
+    Lowercase, strip, and apply Unicode NFC normalisation so that
+    accented characters compare equal regardless of whether they were
+    stored as precomposed code points (e.g. 'ë' = U+00EB) or as a base
+    letter plus combining mark (e.g. 'e' + U+0308). Without NFC,
+    'Citroën' from one source could fail to match the 'citroën' key
+    in MAKE_TO_BRAND even though they look identical.
+    """
     if not make:
         return None
-    return make.strip().lower() or None
+    import unicodedata
+    return unicodedata.normalize("NFC", make.strip().lower()) or None
 
 
 def is_commercial_category(category: str | None) -> str | None:
@@ -341,11 +351,24 @@ class LookupRow:
 def read_lookups(path: Path) -> list[LookupRow]:
     """Parse lookups.txt. Each non-empty, non-comment line is a CSV row:
         vin[,make[,category[,year]]]
-    Whitespace around fields is trimmed."""
+    Whitespace around fields is trimmed.
+
+    File is read as UTF-8 (with BOM tolerance) regardless of the host
+    platform's default encoding — important on Windows where the default
+    can be cp1252 and accented makes like 'Citroën' or 'Škoda' would
+    silently decode to mojibake and fail MAKE_TO_BRAND lookup.
+
+    Unicode is normalised to NFC so that 'ë' encoded as a single code
+    point (U+00EB) and 'ë' encoded as 'e' + combining diaeresis (U+0065
+    + U+0308) both compare equal to the keys in MAKE_TO_BRAND.
+    """
+    import unicodedata
     if not path.exists():
         sys.exit(f"input file not found: {path}")
+    text = path.read_text(encoding="utf-8-sig")
+    text = unicodedata.normalize("NFC", text)
     rows: list[LookupRow] = []
-    for raw in path.read_text().splitlines():
+    for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
