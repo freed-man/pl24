@@ -1022,11 +1022,43 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
 
 
 def extract_paint_code(text: str) -> str:
+    """Try each pattern in order; return the first match that survives
+    validation. Patterns are ordered most-specific-first, so the natural
+    case is that the first match is correct. The validation step exists
+    to handle pages where a less-specific pattern (notably the Nissan-
+    style 'Exterior color\\tCODE') matches a colour-name word like
+    'ELECTRIC' or 'PHANTOM' as if it were a code. When that happens we
+    skip and try the next pattern, rather than returning the bad token.
+    """
     for pat in PAINT_CODE_PATTERNS:
         m = pat.search(text)
-        if m:
-            return _normalise_code(m.group(1).upper())
+        if not m:
+            continue
+        candidate = _normalise_code(m.group(1).upper())
+        if _is_valid_code(candidate):
+            return candidate
     return ""
+
+
+def _is_valid_code(code: str) -> bool:
+    """Reject English-word false positives that the Nissan/Vauxhall
+    patterns can grab when a page shows the colour *name* in the same
+    cell where other brands show a code (Hyundai/Kia behaviour).
+
+    Empirical rule based on every real code we've observed across 40+
+    brands: a genuine manufacturer paint code either (a) contains a
+    digit (e.g. Z11, 1H9, A7W, 49000, JBC2409, 955) or (b) is 3
+    characters or fewer (e.g. JD, CD, KAD, NAJ). Mis-captured colour
+    words like ELECTRIC, PHANTOM, SLEEK, MACHINE, METALLIC, CHAMPION
+    are 4+ letters all-alphabetic and get rejected.
+
+    Revisit if a real 4+-letter all-alpha code ever turns up.
+    """
+    if not code:
+        return False
+    if len(code) <= 3:
+        return True
+    return any(c.isdigit() for c in code)
 
 
 def _normalise_code(code: str) -> str:
