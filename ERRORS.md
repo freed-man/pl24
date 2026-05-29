@@ -46,8 +46,8 @@ found the vehicle — same database, same outcome, no point retrying.
 
 | If you see... | It means... | Fix |
 |---|---|---|
-| `vehicle data did not load` | partslink24 doesn't recognise the VIN | Try with the right `category` (e.g. `N1` for vans), or accept it's not covered |
-| `paint code not found on result page` | Vehicle exists in partslink24 but the page has no paint code | Common for older PSA vehicles; nothing you can do |
+| `vehicle data did not load` | Page never showed paint-bearing data within 10s — could be a slow page, a dropped session, or partslink24 having no record of the VIN | Try `--debug` to inspect; if persistent, likely outside coverage |
+| `paint code not found on result page` | Vehicle exists in partslink24 but the page has no paint code | Common for older PSA vehicles, Jaguar/Ford/Kia/Hyundai; nothing you can do |
 | `could not be assigned to a distinct model` | Catalog couldn't pick a brand for this VIN | Add `category=N1` for vans, or VIN is genuinely outside coverage |
 | `unknown make 'X'` | Make in `lookups.txt` doesn't match any in `MAKE_TO_BRAND` | Check spelling; if legitimate, the brand needs adding to the script |
 | `no make supplied` | Empty make column in `lookups.txt` | Add the make |
@@ -56,6 +56,8 @@ found the vehicle — same database, same outcome, no point retrying.
 | `VIN box not visible` | Catalog UI didn't render the input at all | Run with `--debug` and check the screenshot |
 | `dashboard fallback: SEARCH VIN box ...` | Same family of issues for the dashboard search | As above |
 | `timeout: <details>` | Playwright's own browser-level timeout | Usually transient — retry happens automatically |
+| `attention page detected but no Reload link...` | partslink24's bookmark-warning interstitial changed format | Script aborts; needs a code update to handle the new layout |
+| `attention page still showing after Reload...` | Reload click didn't dismiss the interstitial | Script aborts; investigate manually whether the page format changed |
 
 ---
 
@@ -105,6 +107,43 @@ silently returning empty data.
 Specifically the dashboard's universal search saying it can't pick a
 brand. Usually means the VIN is malformed, foreign-market, or genuinely
 not in partslink24's database.
+
+---
+
+## Multi-leg fallback chains (Mercedes, Fiat, Classic-sibling brands)
+
+For Mercedes commercial vehicles (Vans/Trucks), the Fiat/Fiat Professional
+pair, and any brand with a Classic sibling (BMW, MINI, Mercedes, Porsche,
+VW, BMW Motorrad), a failed lookup may try multiple catalogues before
+falling back to the dashboard. The resulting error string concatenates
+every leg's outcome separated by `; `.
+
+### `vehicle data did not load (timeout); Mercedes-Benz Classic: vehicle data did not load (timeout); dashboard fallback: vehicle data did not load`
+
+Modern Mercedes catalogue timed out → Classic catalogue also timed out →
+dashboard fallback also timed out. partslink24 doesn't have this VIN
+under any Mercedes catalogue. Time cost: ~75 seconds (three timeouts).
+
+### `vehicle not found; Mercedes-Benz Trucks: vehicle not found; Mercedes-Benz Classic: vehicle not found; dashboard fallback: could not be assigned to a distinct model`
+
+Mercedes N1 Sprinter routed to Vans → not found → tried Trucks (the
+commercial sibling) → not found → tried Classic → not found → dashboard
+said couldn't assign. Either the VIN is genuinely outside partslink24's
+Mercedes coverage, or VDG returned a wrong make and the vehicle isn't a
+Mercedes at all.
+
+### `vehicle not found; Fiat Professional: vehicle not found; dashboard fallback: ...`
+
+Fiat M1 routed to passenger Fiat → not found → tried Fiat Professional
+(commercial sibling) → not found → dashboard run. Catches mis-categorised
+Doblòs, Pandas, and other Fiat models on the M1/N1 boundary.
+
+### Reading these errors
+
+The legs appear in execution order, separated by `; `. The leg that
+matters for the dashboard-skip decision is the **last** catalog leg —
+if its error contains "paint code not found", the dashboard is correctly
+skipped (the page loaded, just no code); otherwise the dashboard runs.
 
 ---
 
@@ -245,6 +284,38 @@ Any other unexpected Python exception. Could be `BrowserClosedError`,
 
 If you see one of these consistently, the full message will tell you
 what went wrong.
+
+---
+
+## The `Outcome` column
+
+`results.csv` has a machine-parseable `Outcome` column alongside the
+human-readable `Error` text. Use it for filtering and triage. Values:
+
+| Outcome | Meaning |
+|---|---|
+| `success` | Paint code was extracted |
+| `name_only` | Colour description captured but no code (Jaguar, old LR, etc.) |
+| `not_found_as_routed` | All catalogues we tried said "not here". Could be the VIN is genuinely absent from partslink24, OR we routed it to the wrong catalogue (e.g. forgot `category=N1` for a Sprinter). The label asserts something about the *attempt*, not a definitive claim about partslink24's database. |
+| `unsupported_brand` | The make isn't in `MAKE_TO_BRAND` at all (Honda, Maserati, Subaru, Tesla, Isuzu, Lotus, Genesis) |
+| `paint_data_missing` | Page loaded but the extractors found no code (Ford passenger, Kia, Hyundai pages where partslink24 doesn't carry the code) |
+| `page_load_timeout` | Catalog or dashboard never returned vehicle data within the timeout |
+| `catalog_ui_error` | VIN input never became visible or editable |
+| `auth_error` | Login or session-validation failure |
+| `missing_input` | Empty make column in `lookups.txt` |
+| `unknown` | Anything not yet categorised — open a ticket if you see this |
+
+### Filtering by outcome
+
+Bulk triage example: in Excel/LibreOffice, filter the `Outcome` column to
+quickly group rows:
+
+- `success` → already done
+- `name_only` → coloureg can display the colour name; manual lookup is optional
+- `unsupported_brand` → route straight to manual queue, no further automated attempt will work
+- `not_found_as_routed` → check whether VDG provided category; retry with N1 if it's a van
+- `paint_data_missing` → manual queue (data genuinely absent on partslink24)
+- `page_load_timeout` → worth a retry; might be transient
 
 ---
 

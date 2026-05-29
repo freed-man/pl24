@@ -47,6 +47,7 @@ import os
 import re
 import shutil
 import sys
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -74,9 +75,12 @@ CATALOG_URL_TEMPLATE = (
     "https://www.partslink24.com/partslink24/launchCatalog.do?service={}"
 )
 
-# Per-VIN retries are only useful for transient errors (network/timeout).
-# Logical failures (no catalog for brand, VIN not in DB) are not retried.
-MAX_RETRIES = 1
+# Per-VIN extra attempts (on top of the first one) for transient errors
+# like network timeouts. Logical failures (no catalog for brand, VIN not
+# in DB) are not retried. EXTRA_RETRIES=1 means we make at most 2 total
+# attempts. Named "EXTRA_" rather than "MAX_" so it can't be misread as
+# "maximum total attempts".
+EXTRA_RETRIES = 1
 
 
 # ---------- VDG make -> partslink24 brand -----------------------------------
@@ -284,7 +288,6 @@ def normalise_make(make: str | None) -> str | None:
     """
     if not make:
         return None
-    import unicodedata
     return unicodedata.normalize("NFC", make.strip().lower()) or None
 
 
@@ -362,7 +365,6 @@ def read_lookups(path: Path) -> list[LookupRow]:
     point (U+00EB) and 'ë' encoded as 'e' + combining diaeresis (U+0065
     + U+0308) both compare equal to the keys in MAKE_TO_BRAND.
     """
-    import unicodedata
     if not path.exists():
         sys.exit(f"input file not found: {path}")
     text = path.read_text(encoding="utf-8-sig")
@@ -527,14 +529,26 @@ def _wait_for_squeeze_or_form(page: Page, timeout_ms: int = 15_000) -> str:
     return "timeout"
 
 
+class AttentionPageLoopError(RuntimeError):
+    """Raised when the partslink24 attention/bookmark-warning interstitial
+    keeps reappearing after we click Reload. Indicates the bypass has
+    stopped working — possibly because partslink24 changed the page format
+    or our click target. Caller should abort rather than spin forever."""
+
+
 def handle_attention_page(page: Page) -> bool:
     """Detect and dismiss the partslink24 'Attention - Please read carefully'
     bookmark-warning page, which intercepts direct navigation to login.do.
 
     The page has no login form, just a heading and a Reload link that
     redirects to the proper login flow. We detect by heading text and
-    click Reload; if we somehow land back on it, we bail rather than loop.
-    Returns True if the page was detected and handled."""
+    click Reload; if we somehow land back on it, we raise
+    AttentionPageLoopError rather than silently letting the caller spin.
+
+    Returns True if the page was detected and successfully dismissed,
+    False if no attention page was visible. Raises if a loop is detected
+    or if the page format changed (heading present but no Reload link).
+    """
     # Cheap check first — only do the click work if the heading is present.
     heading = page.locator('h1, h2').filter(has_text="Attention").first
     try:
@@ -547,11 +561,13 @@ def handle_attention_page(page: Page) -> bool:
     reload_link = page.locator('a').filter(has_text=re.compile(r"^\s*Reload\s*$",
                                                                  re.I)).first
     if not reload_link.count():
-        # Heading was there but no Reload link — page changed format. Log
-        # and continue; the caller will fail downstream with a clearer
-        # error from is_logged_in.
-        log("attention page found but no Reload link; continuing")
-        return False
+        # Heading was there but no Reload link — page format changed.
+        # We have no way to dismiss it; fail loudly so the user can see
+        # what happened instead of looping into a re-login wall.
+        raise AttentionPageLoopError(
+            "attention page detected but no Reload link found "
+            "(partslink24 may have changed the page format)"
+        )
 
     try:
         with page.expect_navigation(wait_until="domcontentloaded",
@@ -564,8 +580,12 @@ def handle_attention_page(page: Page) -> bool:
     looped = page.locator('h1, h2').filter(has_text="Attention").first
     try:
         if looped.count() and looped.is_visible():
-            log("attention page: still showing after Reload — bailing")
-            return False
+            raise AttentionPageLoopError(
+                "attention page still showing after Reload — "
+                "would loop indefinitely if we returned to the caller"
+            )
+    except AttentionPageLoopError:
+        raise
     except Exception:
         pass
     return True
@@ -585,12 +605,15 @@ def is_logged_in(page: Page) -> bool:
 
 
 def login(page: Page) -> None:
-    """Run the full login flow. Saves session state on success."""
+    """Run the full login flow. Saves session state on success.
+
+    Note: the dialog handler (auto-accepting JS prompts like the
+    squeeze-out confirmation) is registered once on the browser context
+    in run(), not here — registering it per-login leaked a fresh handler
+    on every call."""
     p_id = os.environ["PARTSLINK24_COMPANY_ID"]
     user = os.environ["PARTSLINK24_USERNAME"]
     pw = os.environ["PARTSLINK24_PASSWORD"]
-
-    page.on("dialog", lambda d: d.accept())
 
     log("logging in")
     page.goto(LOGIN_URL, wait_until="domcontentloaded")
@@ -1140,7 +1163,12 @@ class LookupResult:
 OUTCOMES = frozenset({
     "success",            # paint code was extracted
     "name_only",          # description captured but no code (Jaguar, old LR)
-    "not_in_database",    # partslink24 doesn't have this VIN
+    "not_found_as_routed", # the lookup attempts we made all said "not here"
+                           # — could be VIN genuinely absent from partslink24,
+                           # or VIN present but we routed to the wrong brand
+                           # (e.g. forgot category=N1 for a Sprinter). The
+                           # label asserts something about the *attempt*, not
+                           # a definitive claim about the database.
     "unsupported_brand",  # make not in MAKE_TO_BRAND (Honda, Maserati, etc.)
     "page_load_timeout",  # catalog/dashboard never loaded the vehicle data
     "paint_data_missing", # page loaded but no paint info (old PSA, etc.)
@@ -1182,14 +1210,17 @@ def categorise(result: "LookupResult") -> str:
         return "paint_data_missing"
 
     # Authoritative "not in database" markers — checked before timeouts
-    # because dashboard's verdict overrides an upstream catalog timeout
+    # because dashboard's verdict overrides an upstream catalog timeout.
+    # Note: this is "not found by the routing we attempted", not a
+    # definitive claim about partslink24's database — a Sprinter VIN
+    # routed to passenger Mercedes will land here too.
     if any(p in err for p in (
         "could not be assigned",
         "vehicle not found", "no vehicle found", "no data found",
         "vin invalid", "invalid vin",
         "kein fahrzeug", "nicht gefunden",
     )):
-        return "not_in_database"
+        return "not_found_as_routed"
 
     if "did not load" in err or "timeout" in err:
         return "page_load_timeout"
@@ -1311,7 +1342,16 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
     )
 
     brand, explanation = resolve_brand(row.make, row.category)
+
+    # Two separate trackers — deliberately split:
+    #   catalog_error    accumulates ALL legs for the human-readable
+    #                    `error` column. Compound string, OK to be messy.
+    #   last_leg_error   holds ONLY the most recent leg's error string.
+    #                    Used to decide whether to skip the dashboard,
+    #                    which must reflect the latest authoritative
+    #                    outcome — not a substring scan of the compound.
     catalog_error: str | None = None
+    last_leg_error: str | None = None
 
     if brand and brand in BRAND_CATALOG_SERVICE:
         log(f"looking up {row.vin}  {explanation}")
@@ -1320,6 +1360,7 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
             result.via = "catalog"
             return result
         catalog_error = err
+        last_leg_error = err
         log(f"catalog attempt failed: {err}")
 
         # Commercial-sibling retry: for a Mercedes commercial vehicle the
@@ -1331,7 +1372,7 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
         # paint-not-found here means the right catalogue but no code).
         sibling = COMMERCIAL_FALLBACK.get(brand)
         if (sibling and sibling in BRAND_CATALOG_SERVICE
-                and "paint code not found" not in (err or "")):
+                and "paint code not found" not in (last_leg_error or "")):
             log(f"trying commercial sibling: {sibling}")
             result.paint_code = ""
             result.paint_description = ""
@@ -1341,6 +1382,7 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
                 return result
             log(f"commercial sibling failed: {err2}")
             catalog_error = f"{catalog_error}; {sibling}: {err2}"
+            last_leg_error = err2
             # If the sibling resolved the brand family, prefer Classic
             # fallback for the sibling too (covered by CLASSIC_SIBLING
             # which already maps both Vans and Trucks to MB Classic).
@@ -1363,6 +1405,7 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
                 return result
             log(f"Classic sibling failed: {err}")
             catalog_error = f"{catalog_error}; {classic}: {err}"
+            last_leg_error = err
     else:
         # No brand resolvable, or brand has no catalog. Fall through to
         # the dashboard if allowed.
@@ -1370,6 +1413,7 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
             catalog_error = explanation  # "no make supplied" / "unknown make ..."
         else:
             catalog_error = f"no catalog URL configured for {brand}"
+        last_leg_error = catalog_error
         log(catalog_error)
 
     if not allow_dashboard_fallback:
@@ -1382,11 +1426,17 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
     # would return the same page from the same database and the same
     # extractors would fail again. ~10s saved per affected lookup.
     #
+    # Decision keys off `last_leg_error` specifically, not the accumulated
+    # `catalog_error` — earlier legs in a multi-step fallback chain may
+    # have produced "paint code not found" while a later leg returned a
+    # genuine not-found, and only the final leg's verdict should drive
+    # whether the dashboard is worth trying.
+    #
     # We still try the dashboard for genuine "VIN not found" errors:
     # those CAN succeed via the dashboard's universal search if VDG gave
     # us the wrong make (e.g. a re-badged or imported vehicle filed
     # under a different brand on partslink24).
-    if catalog_error and "paint code not found" in catalog_error:
+    if last_leg_error and "paint code not found" in last_leg_error:
         log("skipping dashboard fallback "
             "(catalog returned data but no paint code)")
         result.error = catalog_error
@@ -1417,7 +1467,7 @@ def lookup_vin_with_retry(page: Page, row: LookupRow, debug: bool,
     in DB' are logical outcomes returned cleanly from lookup_vin, and
     retrying them just wastes time — they'll always produce the same
     result."""
-    for attempt in range(MAX_RETRIES + 1):
+    for attempt in range(EXTRA_RETRIES + 1):
         was_exception = False
         try:
             r = lookup_vin(page, row, debug=debug,
@@ -1439,9 +1489,9 @@ def lookup_vin_with_retry(page: Page, row: LookupRow, debug: bool,
             r.outcome = categorise(r)
             return r
 
-        if attempt < MAX_RETRIES:
+        if attempt < EXTRA_RETRIES:
             log(f"retrying {row.vin} "
-                f"(attempt {attempt + 2}/{MAX_RETRIES + 1})")
+                f"(attempt {attempt + 2}/{EXTRA_RETRIES + 1})")
             page.wait_for_timeout(1500)
     r.outcome = categorise(r)
     return r
@@ -1550,6 +1600,13 @@ def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
     if STATE_FILE.exists():
         ctx_kwargs["storage_state"] = str(STATE_FILE)
     context = browser.new_context(**ctx_kwargs)
+    # Auto-dismiss any JS dialog (squeeze-out confirmation, leave-page
+    # prompts, etc.) on any tab in this context. Registered once on the
+    # context rather than per-page so it covers the main tab, all catalog
+    # tabs we open, and any re-login flows without re-registering each
+    # time. Previously this lived inside login() and leaked a fresh
+    # handler per call.
+    context.on("dialog", lambda d: d.accept())
     page = context.new_page()
 
     if not STATE_FILE.exists():
