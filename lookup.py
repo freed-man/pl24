@@ -69,6 +69,15 @@ LOOKUPS_FILE = ROOT / "lookups.txt"
 RESULTS_FILE = ROOT / "results.csv"
 DEBUG_DIR = ROOT / "_debug"
 
+# When True, dump_debug artifacts are written for EVERY result page, not
+# just failures — including successful lookups. Set once from the
+# --dump-always CLI flag in run(). Useful for inspecting a page that
+# succeeded but produced a surprising/empty field (e.g. a success with no
+# description), where the normal failure-only --debug dump writes nothing.
+# Module-level rather than threaded through every lookup function because
+# it's a whole-run CLI switch, not a per-VIN setting.
+DUMP_ALWAYS = False
+
 LOGIN_URL = "https://www.partslink24.com/partslink24/user/login.do"
 HOME_URL = "https://www.partslink24.com/"
 CATALOG_URL_TEMPLATE = (
@@ -1289,7 +1298,8 @@ def _process_result_page(page: Page, vin: str, result: LookupResult,
 
     Returns (True, None) on success or (False, reason) on failure."""
     def dump():
-        if debug:
+        # Failure-path dumps: --debug OR --dump-always both write here.
+        if debug or DUMP_ALWAYS:
             dump_debug(page, vin + debug_suffix)
 
     text = wait_for_vehicle_data(page, timeout_ms=10_000)
@@ -1306,6 +1316,11 @@ def _process_result_page(page: Page, vin: str, result: LookupResult,
     if not result.paint_code:
         dump()
         return False, f"{error_prefix}{no_paint_msg}"
+    # Success path: dump ONLY under --dump-always. Plain --debug must stay
+    # failure-only (its long-standing contract), so we deliberately do not
+    # call dump() here — we check DUMP_ALWAYS directly.
+    if DUMP_ALWAYS:
+        dump_debug(page, vin + debug_suffix)
     return True, None
 
 
@@ -1598,11 +1613,15 @@ def write_results(results: list[LookupResult]) -> None:
 
 def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
         fresh: bool, skip_brand_check: bool,
-        allow_dashboard_fallback: bool) -> list[LookupResult]:
+        allow_dashboard_fallback: bool,
+        dump_always: bool = False) -> list[LookupResult]:
+    global DUMP_ALWAYS
+    DUMP_ALWAYS = dump_always
+
     if fresh and STATE_FILE.exists():
         STATE_FILE.unlink()
 
-    if debug and DEBUG_DIR.exists():
+    if (debug or dump_always) and DEBUG_DIR.exists():
         # Clear stale dumps from previous runs so this run's _debug/
         # only contains what just happened. We only delete files we
         # would have created — html/png — to avoid clobbering anything
@@ -1754,6 +1773,9 @@ def main() -> None:
                                     "routing)")
     ap.add_argument("--debug", action="store_true",
                     help="show browser + dump HTML on failure")
+    ap.add_argument("--dump-always", action="store_true",
+                    help="dump HTML for every result page, including "
+                         "successes (implies headed browser)")
     ap.add_argument("--fresh", action="store_true",
                     help="ignore saved session and log in fresh")
     ap.add_argument("--skip-brand-check", action="store_true",
@@ -1777,11 +1799,12 @@ def main() -> None:
 
     with sync_playwright() as pw:
         results = run(pw, rows,
-                      headed=args.headed or args.debug,
+                      headed=args.headed or args.debug or args.dump_always,
                       debug=args.debug,
                       fresh=args.fresh,
                       skip_brand_check=args.skip_brand_check,
-                      allow_dashboard_fallback=not args.no_fallback)
+                      allow_dashboard_fallback=not args.no_fallback,
+                      dump_always=args.dump_always)
 
     write_results(results)
     print()
