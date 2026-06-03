@@ -978,6 +978,30 @@ PAINT_DESCRIPTION_PATTERNS = [
         r"(?:\n|\t|$)",
         re.I,
     ),
+    # Ford (passenger): the VIN-dialog "Vehicle data" table renders a row
+    # "Exterior Paint\tFlame" — the label is exactly "Exterior Paint" in
+    # one cell and the colour NAME in the next. partslink24 carries no
+    # paint CODE for Ford passenger cars, so this fills the description
+    # column only (paint_code stays empty -> outcome paint_data_missing,
+    # but coloureg can at least show the colour name).
+    #
+    # Two false-match hazards on the same Ford page, both in the
+    # Equipment tab, both excluded:
+    #   "Exterior Paint Pack\tExterior Paint - Solid"
+    # We require a cell boundary (tab or newline) IMMEDIATELY after
+    # "Paint", which "Paint Pack" (space + word) does not have, so the
+    # label side can't match; and the captured value rejects a leading
+    # "-", so the value side "Exterior Paint - Solid" can't match either.
+    #
+    # Placed last so the brand-specific patterns above (notably the
+    # Jaguar/older-LR "Exterior Paint - <name>" name-only fallback) win
+    # first; this only fires when nothing else has.
+    re.compile(
+        r"Exterior\s*Paint[ \t]*[\t\n]\s*"   # label + cell boundary
+        r"(?!-)"                              # not the "- Solid" value cell
+        r"([A-Za-z][A-Za-z0-9 \-/]*?)\s*$",   # the colour name
+        re.I | re.M,
+    ),
 ]
 
 VEHICLE_DATA_NEEDLE = re.compile(
