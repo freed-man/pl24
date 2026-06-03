@@ -1009,6 +1009,17 @@ PAINT_DESCRIPTION_PATTERNS = [
     re.compile(
         r"Exterior\s*Paint[ \t]*[\t\n]\s*"      # label + cell boundary
         r"(?!-)"                                 # not the "- Solid" value cell
+        r"(?!Interior\b)"                        # not the NEXT field's label:
+                                                 # when the Exterior Paint cell
+                                                 # is empty (seen on US Fords,
+                                                 # e.g. 1FA6...), the rendered
+                                                 # text collapses to "Exterior
+                                                 # Paint\nInterior Fabric" and
+                                                 # the capture would otherwise
+                                                 # grab "Interior Fabric" as a
+                                                 # bogus colour. Interior * is
+                                                 # the consistent follow-on row
+                                                 # across all observed Fords.
         r"([A-Za-z][A-Za-z0-9 ()&\-/]*?)\s*$",   # the colour name
         re.I | re.M,
     ),
