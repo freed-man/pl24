@@ -1147,6 +1147,51 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
     return None
 
 
+def _extract_hyundai_kia_colour(text: str) -> tuple[str, str]:
+    """(code, description) from a Hyundai/Kia "Exterior color" row, or
+    ("","") if the field isn't a Hyundai/Kia-style name.
+
+    Hyundai and Kia put the colour NAME where Nissan/Toyota put a code,
+    in the same "Exterior color" field — which is why the Nissan code
+    pattern used to grab name-words (ELECTRIC, PHANTOM, SLEEK, MACHINE)
+    that _is_valid_code then rejected, leaving both code and description
+    blank. Observed real values (6 Hyundai + 4 Kia):
+
+        CREAMY WHITE [TCW]              name + bracket code  (code rare)
+        CHAMPION BLUE / SHADOW GRAY     name only
+        PHANTOM BLACK PEARL             name only
+        JD HP / TRICOAT WHITE PEARL     name with messy spec prefix
+        CD NEW BROWN EXT LEATHER BEIGE  messy Kia internal string
+
+    We capture the NAME into description (verbatim — we deliberately do
+    NOT try to surgically strip the "JD HP /" / "EXT LEATHER" noise on the
+    messy Kia values, because guessing risks emitting a WRONG colour, which
+    is worse than a slightly noisy-but-correct one), and a trailing
+    "[CODE]" into the paint code when present.
+
+    Disambiguation from Nissan: this fires only when the value is a NAME
+    (contains a space, or is 4+ all-alpha chars). Nissan's bare "KAD" /
+    "Z11" code has no space and is <=3 chars, so it does NOT qualify and is
+    left to the Nissan code pattern. Without this guard the Nissan pattern
+    would also wrongly grab the 2-char "JD"/"CD" prefixes off the messy Kia
+    values as if they were paint codes.
+    """
+    m = re.search(r"Exterior\s*colou?r[ \t]*[\t\n][ \t]*([^\n\t]+)",
+                  text, re.I)
+    if not m:
+        return "", ""
+    val = m.group(1).strip()
+    code = ""
+    bm = re.search(r"\[([A-Z0-9]{1,4})\]\s*$", val)
+    if bm:
+        code = bm.group(1)
+        val = val[:bm.start()].strip()
+    is_name = (" " in val) or (len(val) >= 4 and val.replace(" ", "").isalpha())
+    if not is_name:
+        return "", ""
+    return code, val
+
+
 def extract_paint_code(text: str) -> str:
     """Try each pattern in order; return the first match that survives
     validation. Patterns are ordered most-specific-first, so the natural
@@ -1156,6 +1201,17 @@ def extract_paint_code(text: str) -> str:
     'ELECTRIC' or 'PHANTOM' as if it were a code. When that happens we
     skip and try the next pattern, rather than returning the bad token.
     """
+    # Hyundai/Kia first: their name-style "Exterior color" field may carry
+    # a bracket code (rare). Claiming the field here also stops the Nissan
+    # pattern below from grabbing a messy Kia prefix ("JD"/"CD") as a false
+    # code. If they had a name but NO code, we must still not fall through
+    # to the Nissan pattern (it would grab the name-word), so we return
+    # early for that case too.
+    hk_code, hk_desc = _extract_hyundai_kia_colour(text)
+    if hk_code and _is_valid_code(hk_code):
+        return _normalise_code(hk_code.upper())
+    if hk_desc:                       # Hyundai/Kia name present, no usable code
+        return ""
     for pat in PAINT_CODE_PATTERNS:
         m = pat.search(text)
         if not m:
@@ -1246,6 +1302,12 @@ def extract_paint_description(text: str) -> str:
     return it Title Cased ("Sterlinggrau"). Returns "" if no description
     is on the page (e.g. VW/Audi don't include one in the paint row, and
     Jeep's COLEST row has the code but no inner-parens name)."""
+    # Hyundai/Kia name-style "Exterior color" — checked before the pattern
+    # list (and before PSA) since their colour name lives in a field other
+    # brands use for a code.
+    _, hk_desc = _extract_hyundai_kia_colour(text)
+    if hk_desc:
+        return hk_desc.title()
     # PSA BODY COLOUR is handled by a dedicated normaliser (its field is
     # too irregular for a single capture group); checked first so its
     # cleaning wins over any generic pattern that might partially match.
