@@ -979,14 +979,19 @@ PAINT_DESCRIPTION_PATTERNS = [
         re.I,
     ),
     # Ford (passenger): the VIN-dialog "Vehicle data" table renders a row
-    # "Exterior Paint\tFlame" — the label is exactly "Exterior Paint" in
-    # one cell and the colour NAME in the next. partslink24 carries no
+    # "Exterior Paint\t<colour>" — the label is exactly "Exterior Paint"
+    # in one cell and the colour NAME in the next. partslink24 carries no
     # paint CODE for Ford passenger cars, so this fills the description
-    # column only (paint_code stays empty -> outcome paint_data_missing,
-    # but coloureg can at least show the colour name).
+    # column only (paint_code stays empty -> outcome name_only, but
+    # coloureg can at least show the colour name).
     #
-    # Two false-match hazards on the same Ford page, both in the
-    # Equipment tab, both excluded:
+    # The value cell may be a bare name ("Flame") or carry a finish in
+    # parens ("Panther Black (Metallic)"); we keep the finish because it
+    # matters for paint matching. Hence the capture class allows "()" and
+    # "&" in addition to letters/digits/space/hyphen/slash.
+    #
+    # False-match hazards on the same Ford page, both in the Equipment
+    # tab, both excluded:
     #   "Exterior Paint Pack\tExterior Paint - Solid"
     # We require a cell boundary (tab or newline) IMMEDIATELY after
     # "Paint", which "Paint Pack" (space + word) does not have, so the
@@ -997,9 +1002,9 @@ PAINT_DESCRIPTION_PATTERNS = [
     # Jaguar/older-LR "Exterior Paint - <name>" name-only fallback) win
     # first; this only fires when nothing else has.
     re.compile(
-        r"Exterior\s*Paint[ \t]*[\t\n]\s*"   # label + cell boundary
-        r"(?!-)"                              # not the "- Solid" value cell
-        r"([A-Za-z][A-Za-z0-9 \-/]*?)\s*$",   # the colour name
+        r"Exterior\s*Paint[ \t]*[\t\n]\s*"      # label + cell boundary
+        r"(?!-)"                                 # not the "- Solid" value cell
+        r"([A-Za-z][A-Za-z0-9 ()&\-/]*?)\s*$",   # the colour name
         re.I | re.M,
     ),
 ]
