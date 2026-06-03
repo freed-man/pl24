@@ -1049,6 +1049,14 @@ VIN_NOT_FOUND_PHRASES = (
     "no vehicle found",
     "vehicle not found",
     "no data found",
+    # partslink24's "Tip" popup wording when a VIN isn't in their data:
+    # "No data was found for the searched vehicle identification number
+    # (VIN). Either this VIN does not exist or the data of the associated
+    # vehicle has not been entered yet." Note the "was" — distinct from
+    # the "no data found" variant above, so both are needed. Catching this
+    # in the poll loop makes an unresolvable VIN fail within ~300ms instead
+    # of eating the full 10s VEHICLE_DATA_NEEDLE timeout.
+    "no data was found",
     "could not be assigned to a distinct model",
     "kein fahrzeug",
     "nicht gefunden",
@@ -1257,12 +1265,12 @@ def categorise(result: "LookupResult") -> str:
     # Note: this is "not found by the routing we attempted", not a
     # definitive claim about partslink24's database — a Sprinter VIN
     # routed to passenger Mercedes will land here too.
-    if any(p in err for p in (
-        "could not be assigned",
-        "vehicle not found", "no vehicle found", "no data found",
-        "vin invalid", "invalid vin",
-        "kein fahrzeug", "nicht gefunden",
-    )):
+    #
+    # Reuses VIN_NOT_FOUND_PHRASES (the same set wait_for_vehicle_data
+    # detects mid-poll) rather than a separate inline list, so the two
+    # can't drift apart. "could not be assigned" is matched as a substring
+    # of the full "could not be assigned to a distinct model" phrase.
+    if any(p in err for p in VIN_NOT_FOUND_PHRASES):
         return "not_found_as_routed"
 
     if "did not load" in err or "timeout" in err:
