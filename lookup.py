@@ -1022,6 +1022,11 @@ VEHICLE_DATA_NEEDLE = re.compile(
     r"Color\s*Option|"                     # Vauxhall
     r"Paint\s*Exterior\s*Body\s*Colou?r|"  # Land Rover / Jaguar
     r"Exterior\s*colou?r\s*[/:\n\t ]|"     # VW / Nissan / Toyota / Lexus
+    # Ford passenger: label "Exterior Paint" + a cell boundary (tab or
+    # newline) immediately after. The boundary is what keeps this from
+    # tripping on the Equipment-tab "Exterior Paint Pack" row (space +
+    # word, no boundary) before the Vehicle-data tab has rendered.
+    r"Exterior\s*Paint[ \t]*[\t\n]|"
     r"(?:Colou?r|Farbe)\s*\n\s*[A-Z0-9][A-Z0-9 \-/]*\(\s*[A-Z0-9]{2,8}\s*\)",
     re.I,
 )
@@ -1608,22 +1613,65 @@ def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
         if cleared:
             log(f"cleared {cleared} stale file(s) from {DEBUG_DIR.name}/")
 
+    # Launch flags. The two AutomationControlled-related switches are the
+    # ones that matter for not looking automated: by default Playwright
+    # launches Chromium with --enable-automation (which sets a CDP marker
+    # and the "controlled by automated software" infobar) and with the
+    # AutomationControlled blink feature enabled (which is what sets
+    # navigator.webdriver = true). We turn both off here; the webdriver
+    # flag is then additionally masked via add_init_script below as a
+    # belt-and-braces measure for any code path that re-adds it.
     browser = pw.chromium.launch(
         headless=not headed,
-        args=["--disable-features=Translate"],
+        args=[
+            "--disable-features=Translate,AutomationControlled",
+            "--disable-blink-features=AutomationControlled",
+        ],
+        ignore_default_args=["--enable-automation"],
     )
+
+    # Build the UA from the REAL bundled Chromium version rather than a
+    # hardcoded "Chrome/131". A hardcoded major version drifts out of sync
+    # with the engine that's actually running, and the Sec-CH-UA client-
+    # hint headers Chromium sends are generated from the real version — so
+    # a stale UA major vs. live client-hint major is a detectable mismatch.
+    # Deriving it keeps UA and client hints internally consistent across
+    # any Playwright version this runs on.
+    chrome_version = browser.version            # e.g. "131.0.6778.33"
+    chrome_major = chrome_version.split(".")[0]
+    user_agent = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        f"Chrome/{chrome_version} Safari/537.36"
+    )
+
     ctx_kwargs = {
         "viewport": {"width": 1400, "height": 1200},
-        "user_agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
-        ),
+        "user_agent": user_agent,
         "locale": "en-GB",
+        # Timezone coherence: the UA claims Windows/GB and locale is en-GB,
+        # so the JS timezone should be a UK zone too. A US/other timezone
+        # under an en-GB locale is a soft inconsistency fingerprinters flag.
+        "timezone_id": "Europe/London",
     }
     if STATE_FILE.exists():
         ctx_kwargs["storage_state"] = str(STATE_FILE)
     context = browser.new_context(**ctx_kwargs)
+
+    # Mask the remaining JS-visible automation tells before any page
+    # script runs. add_init_script runs on every new document in the
+    # context (main page, catalog tabs, re-login navigations) ahead of
+    # the site's own scripts.
+    #   - navigator.webdriver: should read false/undefined, not true.
+    #   - navigator.platform: must say "Win32" to match the Windows UA
+    #     (Playwright on a Linux/other host would otherwise leak the real
+    #     host platform here, contradicting the UA).
+    context.add_init_script(
+        """
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+        """
+    )
     # Auto-dismiss any JS dialog (squeeze-out confirmation, leave-page
     # prompts, etc.) on any tab in this context. Registered once on the
     # context rather than per-page so it covers the main tab, all catalog
