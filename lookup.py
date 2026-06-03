@@ -933,14 +933,10 @@ PAINT_DESCRIPTION_PATTERNS = [
         r"\s*\(\s*[A-Z0-9]{2,8}\s*\)",          # immediately followed by (code)
         re.I,
     ),
-    # PSA format (see paint-code pattern for separator/two-tone notes)
-    re.compile(
-        r"BODY\s*COLOU?R\s*[:\n\t ]+\s*"
-        r"[A-Z0-9]{2,6}(?:/[A-Z0-9]{2,6})?\s*-\s*"
-        r"(.+?)"                                # the colour name
-        r"\s+PAINT\b",
-        re.I,
-    ),
+    # PSA (Peugeot/Citroën/DS) BODY COLOUR is NOT handled here — its field
+    # is too irregular for a single capture group (code-prefixed, no-code,
+    # leading-PAINT two-tone). It's normalised by _extract_psa_body_colour,
+    # which extract_paint_description calls before this pattern list.
     # Fiat family: "COLEST\nCODE\nCOLORE ESTERNO (name) (code)"
     # Jeep uses "EXTERNAL COLOR (code)" with no inner-parens name, so the
     # inner group is optional. When Jeep matches, group(1) is None — the
@@ -1174,11 +1170,55 @@ def _normalise_code(code: str) -> str:
     return code
 
 
+def _extract_psa_body_colour(text: str) -> str:
+    """Generalised PSA (Peugeot/Citroën/DS) BODY COLOUR name extractor.
+
+    PSA's BODY COLOUR field is irregular — observed across real DS/Citroën
+    pages in at least these shapes, all on the value line right after a
+    line-leading "BODY COLOUR" label:
+
+        EVL - PLATINUM GREY PAINT          (code, name, trailing PAINT)
+        CHRYSTAL PEARL PAINT               (no code, name, trailing PAINT)
+        ERU/EXY - PAINT WHISPER+BLACK ONYX (two-tone code, LEADING PAINT,
+                                            name parts joined by "+")
+
+    Rather than chase each shape with its own regex, we capture the whole
+    value (to end of line — every real value is single-line, so this can't
+    bleed into the next field) and normalise:
+      1. strip a leading "<code> - " / "<code>/<code> - " prefix
+      2. drop the noise word PAINT wherever it sits (lead/mid/trail)
+      3. turn the two-tone "+" joiner into " + "
+      4. collapse whitespace and Title Case
+
+    BODY COLOUR is anchored to line start so it does NOT match the tail of
+    Jaguar/Land Rover's "Paint Exterior Body Colour" label (handled by
+    their own patterns).
+
+    Returns "" if there's no BODY COLOUR field or it cleans to nothing.
+    """
+    m = re.search(r"(?:^|\n)\s*BODY\s*COLOU?R\s*[:\n\t ]+\s*([^\n]+)",
+                  text, re.I)
+    if not m:
+        return ""
+    v = m.group(1).strip()
+    v = re.sub(r"^[A-Z0-9]{2,6}(?:/[A-Z0-9]{2,6})?\s*-\s*", "", v, flags=re.I)
+    v = re.sub(r"\bPAINT\b", " ", v, flags=re.I)
+    v = v.replace("+", " + ")
+    v = re.sub(r"\s+", " ", v).strip()
+    return v.title()
+
+
 def extract_paint_description(text: str) -> str:
     """Extract the human-readable colour name (e.g. "STERLINGGRAU") and
     return it Title Cased ("Sterlinggrau"). Returns "" if no description
     is on the page (e.g. VW/Audi don't include one in the paint row, and
     Jeep's COLEST row has the code but no inner-parens name)."""
+    # PSA BODY COLOUR is handled by a dedicated normaliser (its field is
+    # too irregular for a single capture group); checked first so its
+    # cleaning wins over any generic pattern that might partially match.
+    psa = _extract_psa_body_colour(text)
+    if psa:
+        return psa
     for pat in PAINT_DESCRIPTION_PATTERNS:
         m = pat.search(text)
         if m:
