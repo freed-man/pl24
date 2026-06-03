@@ -1060,6 +1060,26 @@ VIN_NOT_FOUND_PHRASES = (
     "invalid vin",
 )
 
+# partslink24 sometimes switches OFF VIN identification for an entire
+# brand, showing: "We regret to inform you that the identification of
+# VINs for this brand will not be available for an indefinite period of
+# time. We are currently working with the manufacturer to find a
+# solution." (seen on Dacia). This is a brand-wide, temporary,
+# partslink24-side disablement — NOT a missing VIN and NOT an unsupported
+# brand. We detect it to (a) fail fast in the poll instead of waiting the
+# full 10s, and (b) categorise it distinctly as brand_unavailable so these
+# VINs read as "retry later" rather than dead.
+#
+# A REGEX with \s+ (not a literal substring) because the rendered text
+# carries an embedded newline mid-phrase ("will not\nbe available"), which
+# a plain substring check misses. The fragment is the most stable,
+# distinctive part of the message; if partslink24 reword it, detection
+# silently reverts to the slower page_load_timeout path (the lookup is
+# still attempted and still works the moment the brand returns).
+BRAND_UNAVAILABLE_RE = re.compile(
+    r"will\s+not\s+be\s+available\s+for\s+an\s+indefinite\s+period", re.I
+)
+
 
 # When wait_for_vehicle_data times out we'd normally treat that as
 # "page didn't load". But some result pages genuinely don't have any
@@ -1099,6 +1119,8 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
     while waited < timeout_ms:
         text = collect_all_text(page)
         lower = text.lower()
+        if BRAND_UNAVAILABLE_RE.search(text):
+            return text
         if any(p in lower for p in VIN_NOT_FOUND_PHRASES):
             return text
         if VEHICLE_DATA_NEEDLE.search(text):
@@ -1227,6 +1249,11 @@ def extract_paint_description(text: str) -> str:
 
 
 def vin_error_in_text(text: str) -> str | None:
+    if BRAND_UNAVAILABLE_RE.search(text):
+        # Canonical, whitespace-normalised string so downstream categorise()
+        # and the human-readable error column don't carry the embedded
+        # newline from the rendered page.
+        return "brand VIN identification unavailable (indefinite)"
     lower = text.lower()
     for phrase in VIN_NOT_FOUND_PHRASES:
         if phrase in lower:
@@ -1261,6 +1288,14 @@ OUTCOMES = frozenset({
                            # label asserts something about the *attempt*, not
                            # a definitive claim about the database.
     "unsupported_brand",  # make not in MAKE_TO_BRAND (Honda, Maserati, etc.)
+    "brand_unavailable",  # partslink24 has VIN identification switched OFF for
+                          # this whole brand "for an indefinite period" (seen
+                          # on Dacia). Distinct from unsupported_brand (never
+                          # carried) and not_found_as_routed (this VIN absent):
+                          # it's a TEMPORARY, retryable state — the brand works
+                          # again the moment partslink24 restores it, with no
+                          # code change. Labelled distinctly so these VINs read
+                          # as "retry later", not permanently dead.
     "page_load_timeout",  # catalog/dashboard never loaded the vehicle data
     "paint_data_missing", # page loaded but no paint info (old PSA, etc.)
     "catalog_ui_error",   # VIN box never visible/editable
@@ -1291,6 +1326,14 @@ def categorise(result: "LookupResult") -> str:
         return "missing_input"
     if "login failed" in err or "could not open catalog after re-login" in err:
         return "auth_error"
+
+    # partslink24 has VIN identification switched off brand-wide (Dacia).
+    # Authoritative and checked early: it wins over a downstream dashboard
+    # timeout in the combined error string, because the brand notice is the
+    # real reason the lookup can't succeed. Keys off the canonical string
+    # vin_error_in_text emits (not the raw page text).
+    if "brand vin identification unavailable" in err:
+        return "brand_unavailable"
 
     # Paint-code-not-found path: differentiate "vehicle has a colour name
     # but no code" (Jaguar/old LR) from "page loaded with no paint info at
@@ -1469,7 +1512,9 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
         # paint-not-found here means the right catalogue but no code).
         sibling = COMMERCIAL_FALLBACK.get(brand)
         if (sibling and sibling in BRAND_CATALOG_SERVICE
-                and "paint code not found" not in (last_leg_error or "")):
+                and "paint code not found" not in (last_leg_error or "")
+                and "brand vin identification unavailable"
+                    not in (last_leg_error or "")):
             log(f"trying commercial sibling: {sibling}")
             result.paint_code = ""
             result.paint_description = ""
@@ -1523,6 +1568,15 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
     # would return the same page from the same database and the same
     # extractors would fail again. ~10s saved per affected lookup.
     #
+    # Also skip when the catalog reported the brand as unavailable (Dacia's
+    # "VIN identification ... unavailable for an indefinite period"). The
+    # dashboard's universal VIN search resolves the brand and routes INTO
+    # that same brand catalogue — i.e. straight into the catalogue that
+    # just told us it's switched off. There is no other database for it to
+    # try, so the dashboard can only hit the identical wall (and time out
+    # for 10s doing so). This is a stronger skip case than "no paint code":
+    # there the page at least loaded; here the whole brand catalogue is off.
+    #
     # Decision keys off `last_leg_error` specifically, not the accumulated
     # `catalog_error` — earlier legs in a multi-step fallback chain may
     # have produced "paint code not found" while a later leg returned a
@@ -1532,10 +1586,16 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
     # We still try the dashboard for genuine "VIN not found" errors:
     # those CAN succeed via the dashboard's universal search if VDG gave
     # us the wrong make (e.g. a re-badged or imported vehicle filed
-    # under a different brand on partslink24).
-    if last_leg_error and "paint code not found" in last_leg_error:
-        log("skipping dashboard fallback "
-            "(catalog returned data but no paint code)")
+    # under a different brand on partslink24). Brand-unavailable is the
+    # opposite of that case — the brand is known, it's just disabled — so
+    # it skips rather than retries.
+    if last_leg_error and (
+        "paint code not found" in last_leg_error
+        or "brand vin identification unavailable" in last_leg_error
+    ):
+        reason = ("brand unavailable" if "unavailable" in last_leg_error
+                  else "catalog returned data but no paint code")
+        log(f"skipping dashboard fallback ({reason})")
         result.error = catalog_error
         return result
 
