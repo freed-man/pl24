@@ -1512,9 +1512,9 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
         # paint-not-found here means the right catalogue but no code).
         sibling = COMMERCIAL_FALLBACK.get(brand)
         if (sibling and sibling in BRAND_CATALOG_SERVICE
-                and "paint code not found" not in (last_leg_error or "")
+                and "paint code not found" not in (last_leg_error or "").lower()
                 and "brand vin identification unavailable"
-                    not in (last_leg_error or "")):
+                    not in (last_leg_error or "").lower()):
             log(f"trying commercial sibling: {sibling}")
             result.paint_code = ""
             result.paint_description = ""
@@ -1590,10 +1590,11 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
     # opposite of that case — the brand is known, it's just disabled — so
     # it skips rather than retries.
     if last_leg_error and (
-        "paint code not found" in last_leg_error
-        or "brand vin identification unavailable" in last_leg_error
+        "paint code not found" in last_leg_error.lower()
+        or "brand vin identification unavailable" in last_leg_error.lower()
     ):
-        reason = ("brand unavailable" if "unavailable" in last_leg_error
+        reason = ("brand unavailable"
+                  if "unavailable" in last_leg_error.lower()
                   else "catalog returned data but no paint code")
         log(f"skipping dashboard fallback ({reason})")
         result.error = catalog_error
