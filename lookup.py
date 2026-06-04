@@ -1230,6 +1230,13 @@ def extract_paint_code(text: str) -> str:
     'ELECTRIC' or 'PHANTOM' as if it were a code. When that happens we
     skip and try the next pattern, rather than returning the bad token.
     """
+    # smart first: its two-part "Paint Code" field lists the tridion frame
+    # code before the body code, so the generic patterns would grab the
+    # frame. The helper picks the body-panel code (and is a no-op on every
+    # non-smart page, anchored on the word "tridion").
+    smart_code, _ = _extract_smart_colour(text)
+    if smart_code and _is_valid_code(smart_code):
+        return _normalise_code(smart_code.upper())
     # Hyundai/Kia first: their name-style "Exterior color" field may carry
     # a bracket code (rare). Claiming the field here also stops the Nissan
     # pattern below from grabbing a messy Kia prefix ("JD"/"CD") as a false
@@ -1311,6 +1318,67 @@ def _titlecase_colour(name: str) -> str:
     return " ".join(out)
 
 
+def _smart_balanced_paren_groups(s: str):
+    """Yield (code, inner_text) for each '<CODE> (...)' in s, matching
+    parentheses with balanced nesting so a code's full description is
+    captured even when it contains inner parens like '(Inv (Body...))'."""
+    for m in re.finditer(r"\b([A-Z]{1,2}[A-Z0-9]{1,3})\s*\(", s):
+        code = m.group(1)
+        depth = 0
+        i = m.end() - 1          # position of the opening "("
+        start = i
+        while i < len(s):
+            if s[i] == "(":
+                depth += 1
+            elif s[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    yield code, s[start + 1:i]
+                    break
+            i += 1
+
+
+def _extract_smart_colour(text: str) -> tuple[str, str]:
+    """(code, description) for smart's two-part "Paint Code" field.
+
+    smart bodies have TWO colour components — the tridion safety cell
+    (frame) and the body panels — so the field lists two codes, e.g.:
+        Paint Code
+        EB2 (Invalid (tridion safety cell, silver))  EAZ (Body panels in white)
+    The body-panel colour (EAZ / white) is the one worth matching, not the
+    tridion frame (EB2 / silver), but the frame code comes FIRST so the
+    generic code patterns would grab it. This helper picks the component
+    whose parenthetical mentions "Body".
+
+    Notes from three real pages:
+      - The frame is always "tridion safety cell"; the body is "Body...".
+      - "Inv"/"Invalid" appears on the frame always and on the body
+        SOMETIMES (e.g. "ECN (Inv (Body in black))"), so it is NOT a
+        reliable discriminator — we key off the word "Body" instead, and
+        skip a bare "Inv" token so it's never mistaken for a code.
+      - "Body" may be one paren level deep, hence the balanced-paren walk.
+
+    Anchored on the smart-only word "tridion" so it can't fire on any
+    other brand's page.
+    """
+    if "tridion" not in text.lower():
+        return "", ""
+    m = re.search(
+        r"Paint\s*Code\s*[:\n\t ]+(.*?)(?:\n(?:Interior|Engine|Transmission)\b)",
+        text, re.I | re.S,
+    )
+    if not m:
+        return "", ""
+    for code, inner in _smart_balanced_paren_groups(m.group(1)):
+        if code.lower() == "inv":
+            continue
+        if re.search(r"\bBody\b", inner, re.I):
+            cm = (re.search(r"\bin\s+([a-z]+)", inner, re.I)
+                  or re.search(r",\s*([a-z]+)\s*$", inner, re.I))
+            return code, (cm.group(1) if cm else "")
+    return "", ""
+
+
 def _extract_psa_body_colour(text: str) -> str:
     """Generalised PSA (Peugeot/Citroën/DS) BODY COLOUR name extractor.
 
@@ -1360,6 +1428,10 @@ def extract_paint_description(text: str) -> str:
     return it Title Cased ("Sterlinggrau"). Returns "" if no description
     is on the page (e.g. VW/Audi don't include one in the paint row, and
     Jeep's COLEST row has the code but no inner-parens name)."""
+    # smart two-part "Paint Code" — pick the body-panel colour word.
+    _, smart_desc = _extract_smart_colour(text)
+    if smart_desc:
+        return _titlecase_colour(smart_desc)
     # Hyundai/Kia name-style "Exterior color" — checked before the pattern
     # list (and before PSA) since their colour name lives in a field other
     # brands use for a code.
