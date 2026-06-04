@@ -1386,6 +1386,33 @@ def _extract_smart_colour(text: str) -> tuple[str, str]:
     return "", ""
 
 
+def _extract_mercedes_colour(text: str) -> tuple[str, str]:
+    """(code, description) from Mercedes' "Paint Code" field.
+
+    Mercedes renders "Paint Code\\n<3-digit> (<name> - <finish>)", e.g.
+        Paint Code
+        191 (Cosmos black - Metallic finish)
+        970 (Spectral blue - Metallic finish)
+    The generic code pattern already recovers the 3-digit code; this helper
+    additionally recovers the colour NAME ("Cosmos black"), which was being
+    dropped (Mercedes results were code-only).
+
+    We strip a trailing " - <finish>" of ANY wording (not just "Metallic
+    finish" — Solid etc. exist) and fall back to the whole parenthetical if
+    there is no " - " separator, so a name-only "(Polar white)" still works.
+
+    Requires a 3-DIGIT code, which is what distinguishes this from smart's
+    letter codes ("EB2") — smart has its own helper and is handled first;
+    this never fires on a smart page.
+    """
+    m = re.search(r"Paint\s*Code\s*[:\n\t ]+(\d{3})\s*\(([^)]*)\)", text, re.I)
+    if not m:
+        return "", ""
+    code = m.group(1)
+    name = re.split(r"\s+-\s+", m.group(2).strip())[0].strip()
+    return code, name
+
+
 def _extract_psa_body_colour(text: str) -> str:
     """Generalised PSA (Peugeot/Citroën/DS) BODY COLOUR name extractor.
 
@@ -1439,6 +1466,10 @@ def extract_paint_description(text: str) -> str:
     _, smart_desc = _extract_smart_colour(text)
     if smart_desc:
         return _titlecase_colour(smart_desc)
+    # Mercedes "Paint Code\n<code> (<name> - <finish>)" — recover the name.
+    _, merc_desc = _extract_mercedes_colour(text)
+    if merc_desc:
+        return _titlecase_colour(merc_desc)
     # Hyundai/Kia name-style "Exterior color" — checked before the pattern
     # list (and before PSA) since their colour name lives in a field other
     # brands use for a code.
