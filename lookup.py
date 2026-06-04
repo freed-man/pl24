@@ -1270,6 +1270,29 @@ def _normalise_code(code: str) -> str:
     return code
 
 
+# A whole token that is a valid Roman numeral II..XXXIX (length >= 2 so a
+# stray single "I"/"V"/"X" word isn't caught). Used to undo the one place
+# str.title() gets colour names wrong: it lowercases Roman numerals, e.g.
+# "MIDNIGHT BLACK II" -> "Midnight Black Ii". Deliberately strict — it
+# matches only complete, valid numerals, so real words built from the same
+# letters (Ivy, Mix, Ill, Civic, Ivory) are left untouched.
+_ROMAN_NUMERAL = re.compile(
+    r"^(?:I{1,3}|IV|VI{0,3}|IX|X{1,3}(?:I{1,3}|IV|VI{0,3}|IX)?)$"
+)
+
+
+def _titlecase_colour(name: str) -> str:
+    """Title Case a colour name, then re-uppercase any standalone Roman
+    numeral token (str.title() would lower it to 'Ii'/'Iv'/etc.)."""
+    out = []
+    for word in name.title().split(" "):
+        if len(word) >= 2 and _ROMAN_NUMERAL.match(word.upper()):
+            out.append(word.upper())
+        else:
+            out.append(word)
+    return " ".join(out)
+
+
 def _extract_psa_body_colour(text: str) -> str:
     """Generalised PSA (Peugeot/Citroën/DS) BODY COLOUR name extractor.
 
@@ -1305,7 +1328,7 @@ def _extract_psa_body_colour(text: str) -> str:
     v = re.sub(r"\bPAINT\b", " ", v, flags=re.I)
     v = v.replace("+", " + ")
     v = re.sub(r"\s+", " ", v).strip()
-    return v.title()
+    return _titlecase_colour(v)
 
 
 def extract_paint_description(text: str) -> str:
@@ -1318,7 +1341,7 @@ def extract_paint_description(text: str) -> str:
     # brands use for a code.
     _, hk_desc = _extract_hyundai_kia_colour(text)
     if hk_desc:
-        return hk_desc.title()
+        return _titlecase_colour(hk_desc)
     # PSA BODY COLOUR is handled by a dedicated normaliser (its field is
     # too irregular for a single capture group); checked first so its
     # cleaning wins over any generic pattern that might partially match.
@@ -1328,7 +1351,7 @@ def extract_paint_description(text: str) -> str:
     for pat in PAINT_DESCRIPTION_PATTERNS:
         m = pat.search(text)
         if m:
-            return m.group(1).strip().title() if m.group(1) else ""
+            return _titlecase_colour(m.group(1).strip()) if m.group(1) else ""
     return ""
 
 
