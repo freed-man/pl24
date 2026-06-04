@@ -1,45 +1,105 @@
 # partslink24 paint code lookup
 
+Looks up vehicle paint codes (and colour names, where partslink24 carries
+them) by VIN, for feeding into coloureg. Drives partslink24 with Playwright.
+
 ## Setup
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 playwright install chromium
-
-cp .env.example .env
-# edit .env with your partslink24 ID, username, password
 ```
+
+Credentials are read from the environment as `PARTSLINK24_COMPANY_ID`,
+`PARTSLINK24_USERNAME`, `PARTSLINK24_PASSWORD`. Two ways to provide them
+(the script prefers the first):
+
+1. **`env.py`** in the project root (same pattern as coloureg) — a small
+   Python file that sets the three vars in `os.environ`.
+2. **`.env`** in the project root — loaded via python-dotenv as a fallback.
+
+## Input — `lookups.txt`
+
+One CSV row per vehicle (whitespace tolerated, `#` for comments):
+
+```
+vin,make,category,year
+WDD2120022A341787,Mercedes-Benz,M1,2010
+WV1ZZZ2EZ76030517,Volkswagen,N1,2007
+WF0YXXTTGYFT38981,Ford,N1,2015
+```
+
+- `vin` — required.
+- `make` — required (the script does **not** guess from the VIN; a missing
+  make records the row as an error). Use the everyday make name, e.g.
+  `Mercedes-Benz`, `Volkswagen`, `Citroën`.
+- `category` — optional; defaults to passenger. Set **`N1`** (and `N2`/`N3`)
+  for commercial vehicles / vans (Sprinter, Transit, Crafter, etc.) so they
+  route to the right commercial catalogue.
+- `year` — optional; captured but currently unused (reserved for future
+  Classic-catalogue cutoff routing).
 
 ## Usage
 
-Add VINs to `vins.txt` (one per line), then:
-
 ```bash
-# first run — use --headed so you can watch and confirm everything works
+# first run — use --headed so you can watch and confirm login works
 python lookup.py --headed
 
-# subsequent runs (session is cached in storage_state.json)
-python lookup.py
+# subsequent runs (session cached in storage_state.json)
+python lookup.py                         # process all rows in lookups.txt
 
-# one-off
-python lookup.py --vin WBA12345678901234
+# one-off single VIN (make is required; add --category for vans)
+python lookup.py --vin WVWZZZ... --make Volkswagen
+python lookup.py --vin WV1ZZZ... --make Volkswagen --category N1
 ```
 
-Results append to `results.csv` with timestamp, VIN, paint code, and any error.
+> **Run one VIN at a time, spaced out — never bulk/batch runs.** partslink24
+> flags concurrent/bulk access. This is an operating constraint of the
+> system, not a preference.
+
+### Flags
+
+| Flag | What it does |
+|---|---|
+| `--headed` | Show the browser window (watch what happens) |
+| `--vin VIN --make MAKE` | Look up a single VIN instead of `lookups.txt` |
+| `--category N1` | Category for the single-VIN mode (vans, etc.) |
+| `--fresh` | Ignore the saved session and log in clean (was: deleting `storage_state.json` by hand) |
+| `--debug` | Headed + dump HTML/screenshot to `_debug/<vin>.{html,png}` on failure (`_debug/` is wiped at the start of each debug run) |
+| `--dump-always` | Dump on **every** result incl. successes (implies headed) — for inspecting a page that returns a wrong/blank value |
+| `--skip-brand-check` | Skip the partslink24 brand-list verification at startup |
+| `--no-fallback` | Disable the dashboard SEARCH VIN fallback |
+
+## Output — `results.csv`
+
+Each run appends rows with: `Timestamp, Vin, Paint code, Paint description,
+Via, Outcome, Error`.
+
+- `Paint description` — colour name where partslink24 carries one.
+- `Via` — which leg resolved it: `catalog`, `catalog:commercial`,
+  `catalog:classic`, or `dashboard`.
+- `Outcome` — machine-parseable status (`success`, `name_only`,
+  `paint_data_missing`, `brand_unavailable`, `not_found_as_routed`,
+  `unsupported_brand`, `page_load_timeout`, `catalog_ui_error`,
+  `auth_error`, `missing_input`, `unknown`). See `ERRORS.md` for the full
+  meaning of each and how to triage.
 
 ## If something breaks
 
-The login form and VIN search box selectors are best-effort because
-partslink24 routes differ by manufacturer subscription. If a step fails:
+Selectors are best-effort because partslink24's routes differ by
+manufacturer subscription. If a step fails:
 
-1. Run with `--headed` and watch where it stops.
-2. Open DevTools, inspect the field that should have been filled, copy its
-   `name` or a unique attribute.
-3. Add it to the relevant locator list in `lookup.py`:
-   - login fields: search for `id_field`, `user_field` in `login()`
-   - VIN box: search for `vin_box` in `lookup_vin()`
-   - paint code extraction: `extract_paint_code()` — add a regex or table
-     label in your catalog's language.
+1. Run with `--debug` and watch where it stops (and check the dumped
+   `_debug/<vin>.html` / `.png`).
+2. Inspect the field that should have been filled; copy its `name` or a
+   unique attribute.
+3. Add it to the relevant locator/extractor in `lookup.py`:
+   - login fields → `login()`
+   - VIN box → `lookup_vin()` / `submit_vin()`
+   - paint extraction → the `PAINT_CODE_PATTERNS` / `PAINT_DESCRIPTION_PATTERNS`
+     lists and the per-brand `_extract_*_colour` helpers (add a regex or a
+     table label in the catalogue's language)
 
-Delete `storage_state.json` to force a fresh login.
+`ERRORS.md` is the full reference for every error string and `Outcome`.
+For login problems specifically, `--fresh` forces a clean login.
