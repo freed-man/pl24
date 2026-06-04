@@ -1886,6 +1886,32 @@ def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
         ctx_kwargs["storage_state"] = str(STATE_FILE)
     context = browser.new_context(**ctx_kwargs)
 
+    # Sec-CH-UA client-hint coherence (headless only).
+    #
+    # Headless Chromium sends a Sec-CH-UA REQUEST header whose brand list
+    # is "HeadlessChrome";v="N" — which directly contradicts our UA string
+    # (it claims plain Chrome). A server comparing the two sees an obvious
+    # automation tell. Headed Chromium instead sends "Chromium";v="N",
+    # which is an innocuous discrepancy (plenty of real users run Chromium)
+    # and needs no fixing — so we only override in the headless case (plain
+    # runs, and the future Railway worker).
+    #
+    # We replace it with a real-Google-Chrome-shaped 3-brand list, the
+    # version DERIVED from the live engine (chrome_major) so it always
+    # matches the UA and never drifts when Playwright/Chromium updates.
+    # Only sec-ch-ua needs fixing: by default Chrome also sends
+    # sec-ch-ua-mobile (?0) and sec-ch-ua-platform ("Windows"), both of
+    # which already match our UA, and no high-entropy hints are sent unless
+    # the server requests them via Accept-CH.
+    if not headed:
+        context.set_extra_http_headers({
+            "sec-ch-ua": (
+                f'"Google Chrome";v="{chrome_major}", '
+                f'"Chromium";v="{chrome_major}", '
+                f'"Not?A_Brand";v="99"'
+            )
+        })
+
     # Mask the remaining JS-visible automation tells before any page
     # script runs. add_init_script runs on every new document in the
     # context (main page, catalog tabs, re-login navigations) ahead of
