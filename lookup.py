@@ -936,11 +936,18 @@ PAINT_CODE_PATTERNS = [
 # VW/Audi and Nissan/Vauxhall don't include a colour name in their paint
 # row, so this returns "" for those.
 PAINT_DESCRIPTION_PATTERNS = [
-    # BMW/MINI format
+    # BMW/MINI format. The name run may be followed by a separate
+    # "(FINISH)" paren before the "(CODE)" paren — e.g. "MOONWALK GREY
+    # (METALLIC) (B71)". We KEEP the finish in the description (-> "Moonwalk
+    # Grey (Metallic)"), matching how Ford's name-only path keeps "(Metallic)"
+    # — a consistent treatment of the finish across brands, and it matters
+    # for paint matching. Single-paren "STERLINGGRAU (472)" is unchanged
+    # (optional group doesn't match), and a name with the finish already
+    # inline ("SNAPPER ROCKS BLUE METALLIC (C1G)") is likewise unaffected.
     re.compile(
         r"(?:Exterior\s*)?(?:Colou?r|Farbe)\s*[:\n]\s*"
-        r"([A-Z0-9][A-Z0-9 \-/]*?)"            # the colour name
-        r"\s*\(\s*[A-Z0-9]{2,8}\s*\)",          # immediately followed by (code)
+        r"([A-Z0-9][A-Z0-9 \-/]*?(?:\s*\([A-Z ]+\))?)"  # name + optional (FINISH)
+        r"\s*\(\s*[A-Z0-9]{2,8}\s*\)",                    # then the (code) paren
         re.I,
     ),
     # PSA (Peugeot/Citroën/DS) BODY COLOUR is NOT handled here — its field
