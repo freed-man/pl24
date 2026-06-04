@@ -885,9 +885,19 @@ PAINT_CODE_PATTERNS = [
     # colour name. Label is just "Color" / "Colour" / "Farbe" with no
     # trailing "Code". The colour-name run may include letters, digits,
     # spaces, hyphens and slashes (e.g. "BLACK SAPPHIRE METALLIC").
+    #
+    # Some MINIs break the finish into its OWN parenthesis BEFORE the code:
+    # "MOONWALK GREY (METALLIC) (B71)". Without handling that, the non-greedy
+    # name run stops at the first "(", capturing "METALLIC" (rejected by
+    # _is_valid_code) and losing the real code "B71". The optional
+    # "(<FINISH>)" group — letters/spaces only, so it can never swallow a
+    # code paren (codes contain a digit or are <=3 chars) — lets the capture
+    # reach the actual code paren. Single-paren "STERLINGGRAU (472)" is
+    # unaffected (the optional group simply doesn't match).
     re.compile(
         r"(?:Exterior\s*)?(?:Colou?r|Farbe)\s*[:\n]\s*"
         r"[A-Z0-9][A-Z0-9 \-/]*?"
+        r"(?:\s*\([A-Z ]+\))?"
         r"\s*\(\s*([A-Z0-9]{2,8})\s*\)",
         re.I,
     ),
