@@ -1604,7 +1604,7 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
             result.paint_description = ""
             ok, err2 = _try_catalog(page, row.vin, sibling, result, debug)
             if ok:
-                result.via = "catalog"
+                result.via = "catalog:commercial"
                 return result
             log(f"commercial sibling failed: {err2}")
             catalog_error = f"{catalog_error}; {sibling}: {err2}"
@@ -1638,7 +1638,7 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
             result.paint_description = ""
             ok, err = _try_catalog(page, row.vin, classic, result, debug)
             if ok:
-                result.via = "catalog"
+                result.via = "catalog:classic"
                 return result
             log(f"Classic sibling failed: {err}")
             catalog_error = f"{catalog_error}; {classic}: {err}"
@@ -2039,11 +2039,11 @@ def main() -> None:
     write_results(results)
     print()
     print(f"{'VIN':<19} {'PAINT':<8} {'DESCRIPTION':<28} "
-          f"{'VIA':<10} {'OUTCOME':<19} ERROR")
-    print("-" * 124)
+          f"{'VIA':<18} {'OUTCOME':<19} ERROR")
+    print("-" * 132)
     for r in results:
         print(f"{r.vin:<19} {r.paint_code:<8} "
-              f"{r.paint_description[:28]:<28} {r.via:<10} "
+              f"{r.paint_description[:28]:<28} {r.via:<18} "
               f"{r.outcome:<19} {r.error}")
     print(f"\nappended to {RESULTS_FILE.name}")
 
