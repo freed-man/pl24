@@ -1619,8 +1619,19 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
         # upfront which side a VIN belongs to (see comment on
         # CLASSIC_SIBLING), so we try the modern catalogue first and
         # fall back to Classic only if it failed.
+        #
+        # But skip Classic when the modern catalog returned "paint code
+        # not found": that means the vehicle WAS positively identified in
+        # the modern catalogue (page loaded, data present, just no code) —
+        # so it's definitively a modern model, not a Classic one, and the
+        # Classic catalogue can't supply a code partslink24 doesn't have.
+        # Trying it just burns a ~10s timeout (observed on a modern MINI
+        # whose F-series VIN isn't in MINI Classic). We still try Classic
+        # on a timeout or not-found, where the modern catalogue genuinely
+        # didn't identify the vehicle and Classic might.
         classic = CLASSIC_SIBLING.get(brand)
-        if classic and classic in BRAND_CATALOG_SERVICE:
+        if (classic and classic in BRAND_CATALOG_SERVICE
+                and "paint code not found" not in (last_leg_error or "").lower()):
             log(f"trying Classic sibling: {classic}")
             # Reset any partial extraction from the failed attempt.
             result.paint_code = ""
