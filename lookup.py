@@ -1406,27 +1406,34 @@ def _extract_smart_colour(text: str) -> tuple[str, str]:
 def _extract_mercedes_colour(text: str) -> tuple[str, str]:
     """(code, description) from Mercedes' "Paint Code" field.
 
-    Mercedes renders "Paint Code\\n<3-digit> (<name> - <finish>)", e.g.
-        Paint Code
-        191 (Cosmos black - Metallic finish)
-        970 (Spectral blue - Metallic finish)
-    The generic code pattern already recovers the 3-digit code; this helper
-    additionally recovers the colour NAME ("Cosmos black"), which was being
+    Two observed layouts:
+      passenger: "191 (Cosmos black - Metallic finish)"   (3-digit code)
+      vans:      "9147 (Arctic white paint MB 9147)"        (4-digit code)
+    The generic code pattern recovers the code; this helper additionally
+    recovers the NAME ("Cosmos black" / "Arctic white"), which was being
     dropped (Mercedes results were code-only).
 
-    We strip a trailing " - <finish>" of ANY wording (not just "Metallic
-    finish" — Solid etc. exist) and fall back to the whole parenthetical if
-    there is no " - " separator, so a name-only "(Polar white)" still works.
+    Name cleanup, applied in order, each defensive (no-op if absent):
+      1. cut a trailing " - <finish>"            (passenger: "- Metallic finish")
+      2. cut a trailing " paint ..."             (vans: "... paint MB 9147")
+      3. cut a trailing " MB <digits>..."         (any leftover MB-code tail)
+    Falls back to the whole parenthetical if none apply.
 
-    Requires a 3-DIGIT code, which is what distinguishes this from smart's
-    letter codes ("EB2") — smart has its own helper and is handled first;
-    this never fires on a smart page.
+    Accepts a 3- OR 4-digit code (passenger uses 3, vans use 4). Requiring
+    digits is also what keeps this from firing on smart's letter codes
+    ("EB2") — smart has its own helper and runs first.
+
+    NOTE: the van format is confirmed on a single Sprinter page so far;
+    the cleanups are defensive, but more van samples would harden it.
     """
-    m = re.search(r"Paint\s*Code\s*[:\n\t ]+(\d{3})\s*\(([^)]*)\)", text, re.I)
+    m = re.search(r"Paint\s*Code\s*[:\n\t ]+(\d{3,4})\s*\(([^)]*)\)", text, re.I)
     if not m:
         return "", ""
     code = m.group(1)
-    name = re.split(r"\s+-\s+", m.group(2).strip())[0].strip()
+    name = m.group(2).strip()
+    name = re.split(r"\s+-\s+", name)[0].strip()           # "- Metallic finish"
+    name = re.split(r"\s+paint\b", name, flags=re.I)[0].strip()  # "paint MB 9147"
+    name = re.sub(r"\s+MB\s+\d+.*$", "", name, flags=re.I).strip()
     return code, name
 
 
