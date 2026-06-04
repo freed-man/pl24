@@ -972,16 +972,22 @@ PAINT_DESCRIPTION_PATTERNS = [
     # Volvo / Polestar: paint info rendered as two rows in the popup —
     # left cell has the 5-digit catalogue code (e.g. "49800"), right
     # cell has the 3-digit commercial code plus the colour name (e.g.
-    # "498 Caspian Blue"). We pick up the description from the right
-    # cell. Anchored on the "<3-digit code> <name>" shape so it doesn't
-    # false-match the Nissan/Toyota/Lexus/Vauxhall variants that have
-    # the same "Exterior color" label but no separate name field.
+    # "498 Caspian Blue"). We pick up the description from the right cell.
+    #
+    # The code and name MUST be on the same line (separated by space/tab,
+    # not a newline). The earlier version used "\d{3}\s+<name>" where \s
+    # spans newlines, which false-matched Lexus/Toyota's "Exterior color\n
+    # 085\nInterior color": it took the 3-digit code, crossed the newline,
+    # and grabbed the NEXT field's label "Interior color" as the colour.
+    # Requiring [ \t]+ between code and name (and $ line-anchoring under
+    # re.M) keeps the match inside the Volvo right-cell line. Lexus, whose
+    # code stands alone with a newline before the next field, no longer
+    # matches.
     re.compile(
-        r"Exterior\s*colou?r\s*[:\n\t ]+"
-        r"\d{3}\s+"                       # the 3-digit commercial code
-        r"([A-Za-z][A-Za-z0-9 \-/]+?)"    # the colour name
-        r"(?:\n|\t|$)",
-        re.I,
+        r"Exterior\s*colou?r[:\t ]*[\t\n][ \t]*"
+        r"\d{3}[ \t]+"                    # 3-digit commercial code, SAME line
+        r"([A-Za-z][A-Za-z0-9 \-/]+?)\s*$",  # the colour name, to line end
+        re.I | re.M,
     ),
     # Ford (passenger): the VIN-dialog "Vehicle data" table renders a row
     # "Exterior Paint\t<colour>" — the label is exactly "Exterior Paint"
@@ -1186,6 +1192,11 @@ def _extract_hyundai_kia_colour(text: str) -> tuple[str, str]:
     if bm:
         code = bm.group(1)
         val = val[:bm.start()].strip()
+    # Don't claim a value that STARTS with a 3-digit code + space — that's
+    # the Volvo/Polestar right-cell shape ("498 Caspian Blue"), handled by
+    # its own pattern. Hyundai/Kia names never lead with "<3 digits> ".
+    if re.match(r"\d{3}\s", val):
+        return "", ""
     is_name = (" " in val) or (len(val) >= 4 and val.replace(" ", "").isalpha())
     if not is_name:
         return "", ""
