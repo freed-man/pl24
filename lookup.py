@@ -989,6 +989,24 @@ PAINT_DESCRIPTION_PATTERNS = [
         r"([A-Za-z][A-Za-z0-9 \-/]+?)\s*$",  # the colour name, to line end
         re.I | re.M,
     ),
+    # Volvo / Polestar SEPARATED layout (seen on EX30, XC60): the Vehicle-
+    # data tab is two columns of label/value pairs, so the colour code and
+    # name sit in DIFFERENT pairs, both labelled "Exterior color":
+    #   Exterior color \n 62600 \n Exterior color \n CLOUD BLUE
+    # i.e. <label> <5-digit code> <label-again> <name>. Distinct from the
+    # joined "<3-digit> <name>" form above (Osmium Grey / Luminous Sand).
+    # The doubled "Exterior color" label is the anchor — Lexus/Nissan/
+    # Toyota have only ONE such label, so they can't match this and don't
+    # get their next-field label mis-captured (the Lexus "Interior Color"
+    # bug). The code here is the 5-digit catalogue form; extract_paint_code
+    # still picks it up via the Nissan/Volvo code pattern + _normalise_code.
+    re.compile(
+        r"Exterior\s*colou?r[ \t]*[\t\n][ \t]*"
+        r"\d{3,5}[ \t]*[\t\n][ \t]*"               # first pair: the code
+        r"Exterior\s*colou?r[ \t]*[\t\n][ \t]*"    # second "Exterior color" label
+        r"([A-Za-z][A-Za-z0-9 \-/]+?)\s*$",          # the colour name
+        re.I | re.M,
+    ),
     # Ford (passenger): the VIN-dialog "Vehicle data" table renders a row
     # "Exterior Paint\t<colour>" — the label is exactly "Exterior Paint"
     # in one cell and the colour NAME in the next. partslink24 carries no
@@ -1324,6 +1342,12 @@ def _extract_psa_body_colour(text: str) -> str:
     if not m:
         return ""
     v = m.group(1).strip()
+    # Volvo's equipment tab has a "BODY COLOR   626 POWDER BLUE" line whose
+    # value LEADS with a 3-digit code. PSA values never do, so reject that
+    # shape here — it belongs to Volvo's own (separated) pattern, and
+    # matching it would mis-fill PSA's slot with a Volvo colour.
+    if re.match(r"\d{3}\s", v):
+        return ""
     v = re.sub(r"^[A-Z0-9]{2,6}(?:/[A-Z0-9]{2,6})?\s*-\s*", "", v, flags=re.I)
     v = re.sub(r"\bPAINT\b", " ", v, flags=re.I)
     v = v.replace("+", " + ")
