@@ -1347,16 +1347,21 @@ def _extract_smart_colour(text: str) -> tuple[str, str]:
         EB2 (Invalid (tridion safety cell, silver))  EAZ (Body panels in white)
     The body-panel colour (EAZ / white) is the one worth matching, not the
     tridion frame (EB2 / silver), but the frame code comes FIRST so the
-    generic code patterns would grab it. This helper picks the component
-    whose parenthetical mentions "Body".
+    generic code patterns would grab it. This helper SKIPS the tridion
+    component and returns the other one.
 
-    Notes from three real pages:
-      - The frame is always "tridion safety cell"; the body is "Body...".
-      - "Inv"/"Invalid" appears on the frame always and on the body
-        SOMETIMES (e.g. "ECN (Inv (Body in black))"), so it is NOT a
-        reliable discriminator — we key off the word "Body" instead, and
-        skip a bare "Inv" token so it's never mistaken for a code.
-      - "Body" may be one paren level deep, hence the balanced-paren walk.
+    Notes from four real pages:
+      - The frame component always says "tridion safety cell"; that is the
+        reliable marker. We skip it and take the other code.
+      - The body component is NOT reliably labelled "Body": three pages say
+        "Body panels in <colour>" / "Body in <colour>", but a fourth just
+        says the colour, "EAA (Light blue metallic)". So we must NOT key off
+        the word "Body" — keying off the frame's "tridion" and taking the
+        remainder is what generalises.
+      - "Inv"/"Invalid" is on the frame always and the body sometimes, so
+        it is not a discriminator; we just skip a bare "Inv" code token.
+      - Descriptions: prefer a colour word after "in"/comma; otherwise fall
+        back to the whole parenthetical ("Light blue metallic").
 
     Anchored on the smart-only word "tridion" so it can't fire on any
     other brand's page.
@@ -1372,10 +1377,12 @@ def _extract_smart_colour(text: str) -> tuple[str, str]:
     for code, inner in _smart_balanced_paren_groups(m.group(1)):
         if code.lower() == "inv":
             continue
-        if re.search(r"\bBody\b", inner, re.I):
-            cm = (re.search(r"\bin\s+([a-z]+)", inner, re.I)
-                  or re.search(r",\s*([a-z]+)\s*$", inner, re.I))
-            return code, (cm.group(1) if cm else "")
+        if re.search(r"tridion", inner, re.I):   # skip the frame component
+            continue
+        cm = (re.search(r"\bin\s+([a-z]+)", inner, re.I)
+              or re.search(r",\s*([a-z]+)\s*$", inner, re.I))
+        desc = cm.group(1) if cm else inner.strip()
+        return code, desc
     return "", ""
 
 
