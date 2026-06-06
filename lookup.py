@@ -1106,6 +1106,21 @@ VIN_NOT_FOUND_PHRASES = (
     # of eating the full 10s VEHICLE_DATA_NEEDLE timeout.
     "no data was found",
     "could not be assigned to a distinct model",
+    # The newer React/SPA dashboard ("pl24-app") shows a red MUI snackbar
+    # reading exactly "Error while loading vehicle" when the universal
+    # search can't resolve a VIN. Observed on VINs partslink24 genuinely
+    # doesn't carry (US-built Jeeps "1C4...", and a Fiat) — in every
+    # observed case the catalog leg simultaneously showed the yellow
+    # "No data was found ... built before 2006" Tip, and VINs that ARE
+    # carried loaded a full vehicle-data page instead of this toast. So
+    # this toast is a DEFINITIVE not-found, not a transient load error.
+    # Adding it here lets the dashboard leg fast-fail in ~300ms instead of
+    # eating the full 10s wait; the resulting outcome (not_found_as_routed)
+    # is unchanged from what the slow path already produced — only faster.
+    # NB the snackbar auto-dismisses after a few seconds, so detection is
+    # best-effort within the poll window; missing it simply reverts to the
+    # existing 10s timeout path (still correct, just slower).
+    "error while loading vehicle",
     "kein fahrzeug",
     "nicht gefunden",
     "vin invalid",

@@ -193,12 +193,39 @@ dashboard. Catches mis-categorised Doblòs etc. on the M1/N1 boundary.
 - On **"brand unavailable"** the commercial sibling and dashboard are
   skipped (same disabled catalogue).
 
-### `JMAL`-prefix "Lancia" = Mitsubishi rebadges
+### Cross-branding: the dashboard routes a VIN to its real manufacturer
 
-VINs like `JMALMCX4A9U000204` are Mitsubishi-built Lancia rebadges. The
-Lancia catalogue misses them; the **dashboard recovers them** via the real
-manufacturer (`via=dashboard`). Confirms the dashboard's re-badge purpose;
-the VIN legitimately appears under both Lancia and Mitsubishi.
+When a VIN's badge (from DVLA/VDG) differs from its actual builder, the
+catalog leg for the badged brand returns "no data", and the **dashboard
+re-routes to the true manufacturer's catalogue**. Two confirmed cases:
+
+- **`JMAL`-prefix "Lancia" = Mitsubishi rebadges** (e.g. `JMALMCX4A9U000204`).
+  Lancia catalogue misses them; the dashboard recovers them via Mitsubishi
+  (`via=dashboard`). The VIN legitimately appears under both.
+- **`MCA…JFA`-prefix "Jeep" = Fiat-built** (e.g. `MCANJPCH7JFA19302`). The
+  `MCA` WMI is Italian Stellantis, not a real Jeep WMI (`1C4`/`ZAC`). The
+  Jeep catalog shows "No data was found"; the dashboard correctly cross-brands
+  to **Fiat** (Fiat logo + Fiat model list). NB: in this observed case Fiat
+  *also* lacked the specific VIN, so it still ended not-found — but the
+  cross-branding itself (Jeep → Fiat) is the dashboard working as designed,
+  not a routing bug.
+
+So a dashboard leg landing in a *different* brand than the one routed is
+expected behaviour, not an error.
+
+### Dashboard "Error while loading vehicle" toast = definitive not-found
+
+On the React/SPA dashboard, a red MUI snackbar reading exactly **"Error
+while loading vehicle"** appears when the universal search can't load a
+VIN. Observed only on genuinely-uncarried VINs (US-built `1C4…` Jeeps, a
+Fiat, and the `MCANJPCH7JFA19302` Jeep→Fiat case above); VINs that ARE
+carried load a full vehicle-data page instead. So it is a **definitive
+not-found**, not a transient load error. It is included in
+`VIN_NOT_FOUND_PHRASES` so the dashboard leg fast-fails (~300ms) instead of
+eating the full 10s wait → outcome `not_found_as_routed`. Caveat: the
+snackbar auto-dismisses after a few seconds, so detection is best-effort
+within the poll window; a missed toast simply reverts to the slower 10s
+timeout path (same outcome, just slower).
 
 ---
 
