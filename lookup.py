@@ -1652,10 +1652,12 @@ def _populate_from_text(result: LookupResult, text: str) -> None:
 
 def _process_result_page(page: Page, vin: str, result: LookupResult,
                         debug: bool, *,
+                        source: str = "catalog",
                         debug_suffix: str = "",
                         error_prefix: str = "",
                         timeout_msg: str = "vehicle data did not load (timeout)",
                         no_paint_msg: str = "paint code not found on result page",
+                        retry_on_timeout: int = 1,
                         ) -> tuple[bool, str | None]:
     """Wait for the post-submit result page, then extract the paint code.
 
@@ -1667,6 +1669,23 @@ def _process_result_page(page: Page, vin: str, result: LookupResult,
     strings it produced before (historical results.csv rows depend on
     that wording).
 
+    Silent-timeout retry (retry_on_timeout): partslink24 catalogue pages
+    frequently time out at the 10s limit even though the VIN is present —
+    proven by VINs that succeed on a re-run with the same code (e.g. a
+    Fiat that returned page_load_timeout on one run and "231 / Bez
+    Pastelna" on the very next). wait_for_vehicle_data returns None ONLY
+    for this silent-timeout case: a not-found Tip or brand-unavailable
+    notice returns the text instead (so those still fast-fail and are
+    NOT retried), and a loaded page returns its text. So None is the
+    precise, unambiguous signal that a fresh re-attempt is worth making.
+    We re-submit the VIN on the same page (submit_vin is idempotent) and
+    wait again, up to retry_on_timeout extra times. Recovery always came
+    from a fresh attempt, never from waiting longer, so we re-submit
+    rather than raise the 10s window. The retry is per-leg and capped, so
+    it does not multiply across the commercial/Classic/dashboard chain;
+    it is independent of the whole-lookup EXTRA_RETRIES wrapper (which
+    only re-runs on a thrown exception, never on this clean None return).
+
     Returns (True, None) on success or (False, reason) on failure."""
     def dump():
         # Failure-path dumps: --debug OR --dump-always both write here.
@@ -1674,6 +1693,21 @@ def _process_result_page(page: Page, vin: str, result: LookupResult,
             dump_debug(page, vin + debug_suffix)
 
     text = wait_for_vehicle_data(page, timeout_ms=10_000)
+
+    # Silent timeout (None) → fresh re-attempt(s). Only None qualifies:
+    # not-found / brand-unavailable return text and must not be retried.
+    attempts_left = retry_on_timeout
+    while text is None and attempts_left > 0:
+        attempts_left -= 1
+        log(f"silent timeout — re-submitting {vin} "
+            f"({source}, {attempts_left} retr{'y' if attempts_left == 1 else 'ies'} left after this)")
+        ok, _err = submit_vin(page, vin, source=source)
+        if not ok:
+            # Re-submit itself failed (box gone, etc.) — stop retrying and
+            # fall through to the timeout return below with the original None.
+            break
+        text = wait_for_vehicle_data(page, timeout_ms=10_000)
+
     if text is None:
         dump()
         return False, f"{error_prefix}{timeout_msg}"
@@ -1746,6 +1780,7 @@ def _try_dashboard(page: Page, vin: str, result: LookupResult,
     log("dashboard VIN submitted, waiting up to 10s for vehicle data")
     return _process_result_page(
         page, vin, result, debug,
+        source="dashboard",
         debug_suffix="_dashboard",
         error_prefix="dashboard fallback: ",
         timeout_msg="vehicle data did not load",
