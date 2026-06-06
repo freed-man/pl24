@@ -1552,6 +1552,15 @@ class LookupResult:
     via: str = ""       # "catalog", "dashboard", or "" on failure
     error: str = ""
     outcome: str = ""   # categorised classification, set by categorise()
+    # Set True by lookup_vin ONLY for the specific transient combination
+    # "catalog leg timed out AND dashboard returned could-not-assign" — a
+    # known false-not-found pattern (a present VIN whose catalog leg timed
+    # out twice, then hit a transient dashboard could-not-assign on the
+    # same run). lookup_vin_with_retry honours this flag to grant one
+    # whole-VIN retry. NOT a persisted column — write_results never reads
+    # it; it's purely an in-process retry signal. Defaults False, so every
+    # other outcome is untouched.
+    retryable_transient: bool = False
 
 
 # Fixed vocabulary of outcome categories. Used for triage and analysis —
@@ -1940,6 +1949,39 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
         result.error = f"{catalog_error}; {err}"
     else:
         result.error = err or catalog_error or "lookup failed"
+
+    # B2 — retryable-transient false-not-found.
+    # The specific bad combination: the catalog leg(s) ended in a TIMEOUT
+    # (not a real not-found — that returns "no data was found" text, and
+    # not brand-unavailable — that skips the dashboard entirely above), AND
+    # the dashboard then returned "could not be assigned to a distinct
+    # model". Both can be transient on a struggling session, and together
+    # they produce a present VIN mislabelled not_found_as_routed (the
+    # could-not-assign branch in categorise() wins over the timeout). The
+    # catalog leg already retried once on its silent timeout, so reaching
+    # here means it timed out twice AND the dashboard transiently failed —
+    # rare, but a silent false negative when it happens. Flag it so
+    # lookup_vin_with_retry grants ONE whole-VIN retry; on that retry the
+    # catalog will almost always either load the data (recovering the VIN)
+    # or return a real not-found TEXT (which is not a timeout, so the flag
+    # won't be set again and the honest not_found_as_routed stands). The
+    # flag thus only ever recovers a false negative or leaves the result
+    # unchanged — it can never make an outcome worse.
+    #
+    # Keys off catalog_error containing a timeout (the catalog leg's own
+    # timeout wording) AND err being the could-not-assign verdict. The
+    # toast "error while loading vehicle" is DEFINITIVE not-found (see the
+    # VIN_NOT_FOUND_PHRASES comment) and is deliberately NOT treated as
+    # retryable here.
+    cat_lower = (catalog_error or "").lower()
+    err_lower = (err or "").lower()
+    catalog_timed_out = "timeout" in cat_lower or "did not load" in cat_lower
+    dashboard_could_not_assign = (
+        "could not be assigned to a distinct model" in err_lower
+    )
+    if catalog_timed_out and dashboard_could_not_assign:
+        result.retryable_transient = True
+
     return result
 
 
@@ -1947,10 +1989,17 @@ def lookup_vin_with_retry(page: Page, row: LookupRow, debug: bool,
                           allow_dashboard_fallback: bool = True,
                           ) -> LookupResult:
     """Retry only on genuine browser-side exceptions (Playwright timeout,
-    network errors, etc.). 'No data' / 'paint code not found' / 'VIN not
-    in DB' are logical outcomes returned cleanly from lookup_vin, and
-    retrying them just wastes time — they'll always produce the same
-    result."""
+    network errors, etc.) OR on the B2 retryable-transient flag. 'No data'
+    / 'paint code not found' / 'VIN not in DB' are logical outcomes
+    returned cleanly from lookup_vin, and retrying them just wastes time —
+    they'll always produce the same result.
+
+    The one clean-return exception is lookup_vin's `retryable_transient`
+    flag, set ONLY for the "catalog timed out AND dashboard could-not-
+    assign" combination — a transient false-not-found worth one more
+    whole-VIN attempt (see lookup_vin). It shares this loop's existing
+    bound (EXTRA_RETRIES) and spacing, so it cannot loop unbounded and
+    respects the one-VIN-at-a-time constraint."""
     for attempt in range(EXTRA_RETRIES + 1):
         was_exception = False
         try:
@@ -1969,12 +2018,19 @@ def lookup_vin_with_retry(page: Page, row: LookupRow, debug: bool,
             )
             was_exception = True
 
-        if r.paint_code or not was_exception:
+        # Reasons to retry: a thrown browser-side exception (original
+        # behaviour) OR the B2 transient false-not-found flag. A clean
+        # result with neither is final and returns immediately, as before.
+        should_retry = was_exception or r.retryable_transient
+        if r.paint_code or not should_retry:
             r.outcome = categorise(r)
             return r
 
         if attempt < EXTRA_RETRIES:
-            log(f"retrying {row.vin} "
+            reason = ("transient not-found (catalog timeout + dashboard "
+                      "could-not-assign)" if r.retryable_transient
+                      else "browser exception")
+            log(f"retrying {row.vin} — {reason} "
                 f"(attempt {attempt + 2}/{EXTRA_RETRIES + 1})")
             page.wait_for_timeout(1500)
     r.outcome = categorise(r)
