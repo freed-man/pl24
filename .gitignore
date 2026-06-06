@@ -19,5 +19,5 @@ venv/
 # VS Code
 .vscode/
 
-# VINs
-vins/
+# Miscellaneous
+etc/
