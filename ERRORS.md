@@ -118,8 +118,23 @@ it (see Transient timeouts). If it persists, partslink24 has no record.
 
 ### `vehicle data did not load (timeout); dashboard fallback: could not be assigned to a distinct model`
 
-The dashboard came back with an explicit "could not be assigned". Common
-when you forget `category=N1` for a van. **Fix**: add `category=N1`.
+The catalog leg timed out AND the dashboard came back "could not be
+assigned". Two sub-cases, and the script now distinguishes them:
+
+- **Genuine miss** — usually a missing `category=N1` for a van, or a VIN
+  outside coverage. **Fix**: add `category=N1`; if it persists, the VIN
+  isn't carried.
+- **Transient false-not-found** — both legs can fail transiently on a
+  struggling session, mislabelling a *present* VIN as not-found. Because
+  this exact combination (catalog **timeout** + dashboard
+  **could-not-assign**) is a known transient pattern, the script now flags
+  it `retryable_transient` and grants **one automatic whole-VIN retry**
+  (see Transient timeouts). You'll see a `retrying <VIN> — transient
+  not-found ...` log line. On the retry the VIN usually either loads
+  (recovering it) or returns a real not-found, so the auto-retry only ever
+  recovers a false negative or leaves the outcome unchanged — never worse.
+  Only the literal "could not be assigned to a distinct model" triggers
+  this; the definitive `error while loading vehicle` toast does **not**.
 
 ### `paint code not found on result page; dashboard fallback: paint code not found`
 
@@ -238,14 +253,28 @@ Smart, Porsche, BMW, Škoda. Example: `WP0ZZZ98ZAU770664` returned `M7X`
 on some runs and `page_load_timeout` on others — decided purely by load
 timing.
 
-- A `page_load_timeout` is a **clean return, not an exception**, so the
-  `EXTRA_RETRIES=1` wrapper does **not** retry it (it only retries thrown
-  exceptions). This is the top open dev item — see `PL24_HANDOFF.md`.
-- Recovery always came from a **fresh attempt** (re-run / dashboard), never
-  from waiting longer. The dashboard currently acts as an accidental retry,
-  which is why most timeouts still recover.
-- **Triage:** treat a lone `page_load_timeout` or a `... timeout; dashboard
-  fallback: ... timeout` as "re-run it" before believing the VIN is absent.
+Two layers of automatic recovery now handle this:
+
+- **Silent-timeout retry (per leg).** When a leg's wait returns a clean
+  silent timeout (no data, no not-found text, no brand-unavailable
+  notice), the script re-submits the VIN once on the same page before
+  giving up. You'll see `silent timeout — re-submitting <VIN> (...)`.
+  Recovery always came from a **fresh attempt**, never from waiting
+  longer, so it re-submits rather than lengthening the 10s window. This is
+  per-leg and capped — it does not multiply across the
+  catalog/sibling/dashboard chain.
+- **Whole-VIN retry (B2).** The specific combination "catalog **timeout**
+  + dashboard **could-not-assign**" is a known transient false-not-found.
+  It's flagged `retryable_transient` and gets **one** whole-VIN retry via
+  the `EXTRA_RETRIES=1` wrapper (which otherwise only retries thrown
+  exceptions). Logged as `retrying <VIN> — transient not-found ...`. The
+  retry can only recover a false negative or leave the outcome unchanged.
+
+- **Triage:** with both layers in place, most transient timeouts now
+  recover automatically. A `page_load_timeout` or `... timeout; dashboard
+  fallback: ... timeout` that *survives* the automatic retries is worth one
+  manual re-run before believing the VIN is absent — but this is now the
+  exception, not the rule.
 
 ---
 
