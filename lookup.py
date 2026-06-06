@@ -2026,7 +2026,7 @@ def write_results(results: list[LookupResult]) -> None:
     headers = [h for _, h in columns]
 
     if RESULTS_FILE.exists():
-        with RESULTS_FILE.open("r", newline="") as f:
+        with RESULTS_FILE.open("r", newline="", encoding="utf-8") as f:
             existing_header = next(csv.reader(f), [])
         if existing_header and existing_header != headers:
             archive = RESULTS_FILE.with_suffix(
@@ -2037,7 +2037,7 @@ def write_results(results: list[LookupResult]) -> None:
                 f"{archive.name}")
 
     new_file = not RESULTS_FILE.exists()
-    with RESULTS_FILE.open("a", newline="") as f:
+    with RESULTS_FILE.open("a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         if new_file:
             w.writerow(headers)
