@@ -649,18 +649,17 @@ def login(page: Page) -> None:
             f"(state={state!r}); see {DEBUG_DIR.name}/login_failed.*"
         )
 
-    # Fill the login form like a human: type each field character by
-    # character with jittered timing, pause between fields (as if moving
-    # focus), and pause before clicking Login. The login form is the
-    # highest-value place to not look automated — it's a fixed-layout page
-    # partslink24 fully controls, submitting account-identifying
-    # credentials, so instant three-field paste-and-click is a sharp tell.
-    _human_type(page.locator('#login-id').first, p_id)
-    page.wait_for_timeout(random.uniform(200, 600))
-    _human_type(page.locator('#login-name').first, user)
-    page.wait_for_timeout(random.uniform(200, 600))
-    _human_type(page.locator('#inputPassword').first, pw)
-    page.wait_for_timeout(random.uniform(500, 1_200))
+    # Fill the login form with instant fill(). We briefly used per-
+    # character "human" typing here for anti-detection, but it caused
+    # intermittent login failures ("login data is not valid" — characters
+    # racing/dropping on a re-resolved locator), and a login that fails is
+    # far worse than the theoretical detection it guarded against —
+    # especially since partslink24 sessions drop often, so we log in
+    # frequently and need it rock-solid. fill() is atomic and reliable.
+    page.locator('#login-id').first.fill(p_id)
+    page.locator('#login-name').first.fill(user)
+    page.locator('#inputPassword').first.fill(pw)
+    page.wait_for_timeout(random.uniform(200, 500))
     page.locator('#login-btn').first.click()
 
     # After clicking Login, partslink24 may also throw up a squeeze-out
@@ -802,28 +801,6 @@ def _wait_for_editable(box, timeout_ms: int) -> bool:
             return False
         waited += interval
     return False
-
-
-def _human_type(box, value: str, *, click_first: bool = True) -> None:
-    """Type `value` into `box` with human-like per-character timing.
-
-    Anti-detection: Playwright's fill() sets the whole value in one DOM
-    write, which dispatches no realistic keystroke timing — an obvious
-    automation tell to any layer that watches inter-keystroke intervals
-    (common in login/fraud instrumentation). We instead dispatch one
-    character at a time with a JITTERED pause between them (a fixed
-    per-char delay is itself a signature, so the pause is randomised).
-    We click to focus first (a human clicks the field before typing),
-    unless the caller has already focused it."""
-    if click_first:
-        try:
-            box.click(timeout=5_000)
-        except Exception:
-            pass
-    for i, ch in enumerate(value):
-        if i:
-            box.page.wait_for_timeout(random.uniform(40, 140))
-        box.type(ch)
 
 
 def submit_vin(page: Page, vin: str, *, source: str) -> tuple[bool, str | None]:
