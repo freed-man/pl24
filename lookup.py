@@ -617,7 +617,7 @@ def is_logged_in(page: Page) -> bool:
     return False
 
 
-def login(page: Page) -> None:
+def login(page: Page, save_state: bool = True) -> None:
     """Navigate to the login page and run the full login flow.
 
     Used for the cold-start case (no saved session at all). When we
@@ -625,6 +625,11 @@ def login(page: Page) -> None:
     run() instead lands on the login page via the HOME_URL redirect and
     calls _complete_login_from_current_page() directly — avoiding a second
     navigation to the same login.do page.
+
+    `save_state` is forwarded to the login tail: True (default, the CLI's
+    behaviour) writes storage_state.json after a successful login; the
+    long-lived service passes False since it keeps the session in memory
+    and an ephemeral container has no use for the file.
 
     Note: the dialog handler (auto-accepting JS prompts like the
     squeeze-out confirmation) is registered once on the browser context
@@ -634,19 +639,24 @@ def login(page: Page) -> None:
     page.goto(LOGIN_URL, wait_until="domcontentloaded")
     handle_attention_page(page)  # bookmark-warning interstitial
     handle_cookie_consent(page)
-    _complete_login_from_current_page(page)
+    _complete_login_from_current_page(page, save_state=save_state)
 
 
-def _complete_login_from_current_page(page: Page) -> None:
+def _complete_login_from_current_page(page: Page,
+                                      save_state: bool = True) -> None:
     """Fill and submit the login form that is ALREADY present on the
-    current page, then confirm we're logged in and save the session.
+    current page, then confirm we're logged in and (optionally) save the
+    session.
 
     Assumes the caller has already navigated to a partslink24 page that
     resolves to the login form (either login() after going to LOGIN_URL,
     or run() after the HOME_URL redirect on an expired session) and has
     handled the attention/cookie interstitials. This is the shared tail of
     the login flow, factored out so the expired-session path doesn't have
-    to navigate to login.do a second time."""
+    to navigate to login.do a second time.
+
+    `save_state` controls the storage_state.json write at the end: True
+    (default) for the CLI; False for the in-memory service session."""
     p_id = os.environ["PARTSLINK24_COMPANY_ID"]
     user = os.environ["PARTSLINK24_USERNAME"]
     pw = os.environ["PARTSLINK24_PASSWORD"]
@@ -694,8 +704,9 @@ def _complete_login_from_current_page(page: Page) -> None:
         msg = _extract_login_error(page)
         raise RuntimeError(f"login failed: {msg}")
 
-    log("logged in, saved session")
-    page.context.storage_state(path=str(STATE_FILE))
+    log("logged in, saved session" if save_state else "logged in")
+    if save_state:
+        page.context.storage_state(path=str(STATE_FILE))
 
 
 def _extract_login_error(page: Page) -> str:
@@ -2126,23 +2137,12 @@ def write_results(results: list[LookupResult]) -> None:
             w.writerow(row)
 
 
-def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
-        fresh: bool, skip_brand_check: bool,
-        allow_dashboard_fallback: bool,
-        dump_always: bool = False,
-        inter_vin_delay: tuple[float, float] = (0.0, 0.0),
-        ) -> list[LookupResult]:
-    global DUMP_ALWAYS
-    DUMP_ALWAYS = dump_always
-
-    if fresh and STATE_FILE.exists():
-        STATE_FILE.unlink()
-
-    if (debug or dump_always) and DEBUG_DIR.exists():
-        # Clear stale dumps from previous runs so this run's _debug/
-        # only contains what just happened. We only delete files we
-        # would have created — html/png — to avoid clobbering anything
-        # the user happens to have stashed in there.
+def _clear_stale_debug_dumps() -> None:
+    """Delete this-script's .html/.png dumps from a previous run so the
+    current run's _debug/ only contains what just happened. Only removes
+    files we ourselves would have created, never anything else stashed
+    there. Extracted unchanged from run()."""
+    if DEBUG_DIR.exists():
         cleared = 0
         for f in DEBUG_DIR.iterdir():
             if f.is_file() and f.suffix.lower() in (".html", ".png"):
@@ -2154,6 +2154,21 @@ def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
         if cleared:
             log(f"cleared {cleared} stale file(s) from {DEBUG_DIR.name}/")
 
+
+def _launch_browser_and_context(pw: Playwright, headed: bool,
+                                use_saved_state: bool):
+    """Launch Chromium and build a context with all the anti-detection
+    setup, returning (browser, context, page).
+
+    This is the browser-construction half of the old run() body, extracted
+    verbatim so BOTH run() (one-shot CLI/batch) and Session (long-lived
+    service) build an identical, identically-fingerprinted browser. Nothing
+    here changed — same launch args, same context kwargs, same Sec-CH-UA
+    coherence fix, same init scripts, same dialog handler.
+
+    `use_saved_state` controls whether STATE_FILE is loaded as storage_state
+    (callers decide; run() loads it if present, the service may choose not
+    to depend on a persisted session file)."""
     # Launch flags. The two AutomationControlled-related switches are the
     # ones that matter for not looking automated: by default Playwright
     # launches Chromium with --enable-automation (which sets a CDP marker
@@ -2195,7 +2210,7 @@ def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
         # under an en-GB locale is a soft inconsistency fingerprinters flag.
         "timezone_id": "Europe/London",
     }
-    if STATE_FILE.exists():
+    if use_saved_state and STATE_FILE.exists():
         ctx_kwargs["storage_state"] = str(STATE_FILE)
     context = browser.new_context(**ctx_kwargs)
 
@@ -2247,9 +2262,23 @@ def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
     # handler per call.
     context.on("dialog", lambda d: d.accept())
     page = context.new_page()
+    return browser, context, page
 
+
+def _establish_session(page: Page, save_state: bool = True) -> None:
+    """Ensure `page` ends up on a logged-in partslink24 dashboard.
+
+    This is the session-establishment half of the old run() body, extracted
+    verbatim. Cold start (no saved session) logs in fresh; a reused session
+    is validated by a single navigation to HOME_URL — if it redirects to the
+    login form we complete login in place (no second navigation). Behaviour
+    is unchanged from the original inline block.
+
+    `save_state` is threaded through to the login tail so the long-lived
+    service can opt out of writing storage_state.json if desired; the CLI
+    keeps the original save-on-login behaviour (save_state=True)."""
     if not STATE_FILE.exists():
-        login(page)
+        login(page, save_state=save_state)
     else:
         # We reused saved cookies — but partslink24 sessions expire and
         # nothing in storage_state.json tells us whether they're still
@@ -2266,7 +2295,7 @@ def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
             page.goto(HOME_URL, wait_until="domcontentloaded", timeout=20_000)
         except PlaywrightTimeoutError:
             log("could not load partslink24; logging in fresh")
-            login(page)
+            login(page, save_state=save_state)
         else:
             handle_attention_page(page)
             handle_cookie_consent(page)
@@ -2274,7 +2303,152 @@ def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
                 log("saved session OK")
             else:
                 log("saved session expired; re-logging in (in place)")
-                _complete_login_from_current_page(page)
+                _complete_login_from_current_page(page, save_state=save_state)
+
+
+class Session:
+    """A long-lived, logged-in partslink24 browser session for the service.
+
+    Holds one browser + context + page open across many lookups so we don't
+    pay the ~9s login on every request. Reuses the exact same construction
+    and login logic as the CLI (via the shared helpers above), so the
+    fingerprint and behaviour are identical to a one-shot run.
+
+    Designed for one-VIN-at-a-time use: the scraper assumes a single page
+    driven sequentially, so callers (the FastAPI service) MUST serialise
+    lookups with a lock. This class does not lock internally — it leaves
+    concurrency control to the caller, matching how run() drives one VIN at
+    a time.
+
+    Self-healing: lookup() validates the session cheaply (is_logged_in, no
+    navigation) before each VIN and re-logs-in in place if it died — no
+    background pinging, recovery happens only when a real request needs it.
+    If the whole browser/context has crashed, start() can be called again to
+    rebuild from scratch.
+
+    State files: the service has no use for results.csv (that's the CLI
+    batch artifact) and an ephemeral container has no use for persisting
+    storage_state.json, so save_state defaults to False here — the session
+    lives in memory for the life of the process."""
+
+    def __init__(self, pw: Playwright, *, headed: bool = False,
+                 skip_brand_check: bool = False,
+                 allow_dashboard_fallback: bool = True,
+                 save_state: bool = False):
+        self._pw = pw
+        self._headed = headed
+        self._skip_brand_check = skip_brand_check
+        self._allow_dashboard_fallback = allow_dashboard_fallback
+        self._save_state = save_state
+        self._browser = None
+        self._context = None
+        self._page = None
+
+    def start(self) -> None:
+        """Launch the browser, log in, and (optionally) verify the brand
+        list once. Idempotent-ish: if called when already started it tears
+        the old browser down first so a crashed session can be rebuilt by
+        simply calling start() again."""
+        if self._browser is not None:
+            self.close()
+        self._browser, self._context, self._page = _launch_browser_and_context(
+            self._pw, headed=self._headed, use_saved_state=self._save_state,
+        )
+        _establish_session(self._page, save_state=self._save_state)
+        if not self._skip_brand_check:
+            verify_brand_list(self._page)
+
+    def _ensure_logged_in(self) -> None:
+        """Cheap per-request session validity check + in-place re-login.
+
+        is_logged_in() is a no-navigation DOM check, so this is essentially
+        free when the session is healthy (the common case). When the session
+        has expired, navigate home (which redirects to the login form) and
+        complete login in place — the same recovery run() does for a stale
+        saved session, just triggered lazily per request instead of once at
+        startup."""
+        if is_logged_in(self._page):
+            return
+        log("session not logged in at request time; re-logging in")
+        try:
+            self._page.goto(HOME_URL, wait_until="domcontentloaded",
+                            timeout=20_000)
+        except PlaywrightTimeoutError:
+            login(self._page, save_state=self._save_state)
+            return
+        handle_attention_page(self._page)
+        handle_cookie_consent(self._page)
+        if is_logged_in(self._page):
+            return
+        _complete_login_from_current_page(self._page,
+                                          save_state=self._save_state)
+
+    def lookup(self, row: LookupRow, *, debug: bool = False) -> LookupResult:
+        """Run one VIN lookup on the held-open session, re-logging in first
+        if the session has expired. Delegates to the same
+        lookup_vin_with_retry the CLI uses, so per-VIN retry/fallback
+        behaviour is identical.
+
+        Caller must hold a lock around this — one VIN at a time."""
+        if self._page is None:
+            raise RuntimeError("Session.lookup() called before start()")
+        self._ensure_logged_in()
+        return lookup_vin_with_retry(
+            self._page, row, debug=debug,
+            allow_dashboard_fallback=self._allow_dashboard_fallback,
+        )
+
+    def is_alive(self) -> bool:
+        """Best-effort check that the browser is still connected. The
+        service can call this to decide whether to start() a fresh session
+        after a suspected crash."""
+        try:
+            return self._browser is not None and self._browser.is_connected()
+        except Exception:  # noqa: BLE001
+            return False
+
+    def close(self) -> None:
+        """Tear down the context and browser. Safe to call multiple times."""
+        try:
+            if self._context is not None:
+                self._context.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if self._browser is not None:
+                self._browser.close()
+        except Exception:  # noqa: BLE001
+            pass
+        self._browser = self._context = self._page = None
+
+
+def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
+        fresh: bool, skip_brand_check: bool,
+        allow_dashboard_fallback: bool,
+        dump_always: bool = False,
+        inter_vin_delay: tuple[float, float] = (0.0, 0.0),
+        ) -> list[LookupResult]:
+    """One-shot CLI/batch entry point. Now a thin user of the shared
+    browser/session helpers: build browser+context, establish session,
+    verify brands, loop the VINs, tear down. Behaviour is identical to the
+    previous inline implementation — the body was extracted into
+    _launch_browser_and_context / _establish_session, not changed."""
+    global DUMP_ALWAYS
+    DUMP_ALWAYS = dump_always
+
+    if fresh and STATE_FILE.exists():
+        STATE_FILE.unlink()
+
+    if debug or dump_always:
+        _clear_stale_debug_dumps()
+
+    if debug or dump_always:
+        _clear_stale_debug_dumps()
+
+    browser, context, page = _launch_browser_and_context(
+        pw, headed=headed, use_saved_state=True,
+    )
+    _establish_session(page, save_state=True)
 
     if not skip_brand_check:
         verify_brand_list(page)
