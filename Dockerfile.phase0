@@ -1,0 +1,31 @@
+# pl24 — Phase 0 PROBE image (throwaway).
+#
+# Identical to the main Dockerfile except the entrypoint runs the throwaway
+# login probe (phase0_probe.py) instead of the CLI. Used only to answer the
+# datacenter-IP login question on Railway, then deleted.
+#
+# To deploy this on Railway instead of the default Dockerfile, point the
+# service's "Dockerfile Path" setting at  Dockerfile.phase0  (Settings ->
+# Build -> Dockerfile Path), or rename this to Dockerfile in a throwaway branch.
+FROM mcr.microsoft.com/playwright/python:v1.60.0-noble
+
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Both the scraper and the probe that imports it.
+COPY lookup.py .
+COPY phase0_probe.py .
+
+RUN mkdir -p /app/_debug && chown -R pwuser:pwuser /app
+USER pwuser
+
+# PYTHONUNBUFFERED is already set so probe prints stream to Railway logs live.
+ENTRYPOINT ["python", "phase0_probe.py"]

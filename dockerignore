@@ -1,0 +1,25 @@
+# Never bake secrets into the image
+.env
+env.py
+
+# Runtime / session artifacts — must not leak into the image, and would bust
+# the build cache on every run
+storage_state.json
+results.csv
+lookups.txt
+_debug/
+
+# Python cruft
+__pycache__/
+*.pyc
+
+# Local envs / editor / git
+.venv/
+venv/
+.vscode/
+.git/
+.gitignore
+
+# Docs not needed at runtime
+ERRORS.md
+NOTES.md
