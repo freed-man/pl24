@@ -44,9 +44,11 @@ Usage:
 import argparse
 import csv
 import os
+import random
 import re
 import shutil
 import sys
+import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
@@ -647,15 +649,25 @@ def login(page: Page) -> None:
             f"(state={state!r}); see {DEBUG_DIR.name}/login_failed.*"
         )
 
-    page.locator('#login-id').first.fill(p_id)
-    page.locator('#login-name').first.fill(user)
-    page.locator('#inputPassword').first.fill(pw)
+    # Fill the login form like a human: type each field character by
+    # character with jittered timing, pause between fields (as if moving
+    # focus), and pause before clicking Login. The login form is the
+    # highest-value place to not look automated — it's a fixed-layout page
+    # partslink24 fully controls, submitting account-identifying
+    # credentials, so instant three-field paste-and-click is a sharp tell.
+    _human_type(page.locator('#login-id').first, p_id)
+    page.wait_for_timeout(random.uniform(200, 600))
+    _human_type(page.locator('#login-name').first, user)
+    page.wait_for_timeout(random.uniform(200, 600))
+    _human_type(page.locator('#inputPassword').first, pw)
+    page.wait_for_timeout(random.uniform(500, 1_200))
     page.locator('#login-btn').first.click()
 
     # After clicking Login, partslink24 may also throw up a squeeze-out
     # (if a session reappeared between our load and our submit). Give it
-    # a moment, then handle if needed.
-    page.wait_for_timeout(1_500)
+    # a moment, then handle if needed. Jittered (not a fixed 1500ms — a
+    # constant delay is a weak bot signal of its own).
+    page.wait_for_timeout(random.uniform(1_200, 1_900))
     handle_session_squeeze_out(page)
 
     try:
@@ -792,6 +804,28 @@ def _wait_for_editable(box, timeout_ms: int) -> bool:
     return False
 
 
+def _human_type(box, value: str, *, click_first: bool = True) -> None:
+    """Type `value` into `box` with human-like per-character timing.
+
+    Anti-detection: Playwright's fill() sets the whole value in one DOM
+    write, which dispatches no realistic keystroke timing — an obvious
+    automation tell to any layer that watches inter-keystroke intervals
+    (common in login/fraud instrumentation). We instead dispatch one
+    character at a time with a JITTERED pause between them (a fixed
+    per-char delay is itself a signature, so the pause is randomised).
+    We click to focus first (a human clicks the field before typing),
+    unless the caller has already focused it."""
+    if click_first:
+        try:
+            box.click(timeout=5_000)
+        except Exception:
+            pass
+    for i, ch in enumerate(value):
+        if i:
+            box.page.wait_for_timeout(random.uniform(40, 140))
+        box.type(ch)
+
+
 def submit_vin(page: Page, vin: str, *, source: str) -> tuple[bool, str | None]:
     """Find the VIN input on the page and submit `vin`.
 
@@ -830,6 +864,11 @@ def submit_vin(page: Page, vin: str, *, source: str) -> tuple[bool, str | None]:
     if not _wait_for_editable(box, timeout_ms=10_000):
         return False, f"{box_name} {editable_suffix}"
     try:
+        # VIN search box uses instant fill: it's a low-value target for
+        # behavioural detection (an in-app search, not the login), and
+        # since the partslink24 session drops frequently this runs often,
+        # so the speed matters. Login typing IS humanised (see login()) —
+        # that's the account-identifying, most-scrutinised action.
         box.fill(vin, timeout=5_000)
         box.press("Enter")
     except PlaywrightTimeoutError:
@@ -2032,7 +2071,7 @@ def lookup_vin_with_retry(page: Page, row: LookupRow, debug: bool,
                       else "browser exception")
             log(f"retrying {row.vin} — {reason} "
                 f"(attempt {attempt + 2}/{EXTRA_RETRIES + 1})")
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(random.uniform(1_200, 2_000))
     r.outcome = categorise(r)
     return r
 
@@ -2105,7 +2144,9 @@ def write_results(results: list[LookupResult]) -> None:
 def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
         fresh: bool, skip_brand_check: bool,
         allow_dashboard_fallback: bool,
-        dump_always: bool = False) -> list[LookupResult]:
+        dump_always: bool = False,
+        inter_vin_delay: tuple[float, float] = (0.0, 0.0),
+        ) -> list[LookupResult]:
     global DUMP_ALWAYS
     DUMP_ALWAYS = dump_always
 
@@ -2250,7 +2291,21 @@ def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
         verify_brand_list(page)
 
     results = []
+    lo, hi = inter_vin_delay
     for i, row in enumerate(rows, 1):
+        # Inter-VIN pacing (anti-detection / operating constraint).
+        # partslink24 is a login-gated paid service that can see all
+        # activity server-side; bursty back-to-back lookups on one account
+        # are the behaviour that has caused access problems. Sleep a
+        # randomised interval BEFORE each VIN except the first, so a
+        # single-VIN run never waits but multi-VIN runs (and the future
+        # worker) are spaced out by default. Randomised, not fixed, so the
+        # cadence isn't a clean machine signature. Set --delay 0 to disable
+        # (e.g. fast local iteration where realism doesn't matter).
+        if i > 1 and hi > 0:
+            pause = random.uniform(lo, hi)
+            log(f"pacing: waiting {pause:.0f}s before next VIN")
+            time.sleep(pause)
         log(f"--- {i}/{len(rows)} ---")
         results.append(lookup_vin_with_retry(
             page, row, debug=debug,
@@ -2299,7 +2354,34 @@ def main() -> None:
                     help="skip the once-per-run partslink24 brand-list check")
     ap.add_argument("--no-fallback", action="store_true",
                     help="disable dashboard SEARCH VIN fallback")
+    ap.add_argument("--delay", default="0",
+                    help="seconds to wait between VINs (multi-VIN runs "
+                         "only; the first VIN never waits). A single "
+                         "number is a fixed delay; 'LO-HI' (e.g. '20-60') "
+                         "is a randomised range. Default '0' (off) — "
+                         "typical usage is one VIN at a time, so pacing "
+                         "rarely applies; set e.g. '20-60' for spaced-out "
+                         "multi-VIN batches or the queue worker.")
     args = ap.parse_args()
+
+    # Parse --delay into a (lo, hi) tuple. Accept "N" (fixed) or "LO-HI".
+    def _parse_delay(spec: str) -> tuple[float, float]:
+        spec = spec.strip()
+        try:
+            if "-" in spec:
+                lo_s, hi_s = spec.split("-", 1)
+                lo, hi = float(lo_s), float(hi_s)
+            else:
+                lo = hi = float(spec)
+        except ValueError:
+            sys.exit(f"--delay: could not parse {spec!r} "
+                     f"(use 'N' or 'LO-HI', e.g. '30' or '20-60')")
+        if lo < 0 or hi < 0 or hi < lo:
+            sys.exit(f"--delay: invalid range {spec!r} "
+                     f"(need 0 <= LO <= HI)")
+        return (lo, hi)
+
+    inter_vin_delay = _parse_delay(args.delay)
 
     if args.vin:
         if not args.make:
@@ -2321,7 +2403,8 @@ def main() -> None:
                       fresh=args.fresh,
                       skip_brand_check=args.skip_brand_check,
                       allow_dashboard_fallback=not args.no_fallback,
-                      dump_always=args.dump_always)
+                      dump_always=args.dump_always,
+                      inter_vin_delay=inter_vin_delay)
 
     write_results(results)
     print()
