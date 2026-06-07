@@ -1,2 +1,5 @@
 playwright>=1.60
 python-dotenv>=1.0
+fastapi>=0.110
+uvicorn[standard]>=0.29
+anyio>=4.0

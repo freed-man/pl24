@@ -1,16 +1,13 @@
-# pl24 — Phase 0 container.
+# pl24 paint-lookup service container.
 #
-# Goal of this image: prove pl24 runs headless in a clean Linux container
-# (no fonts/locale/codecs borrowed from Roland's Windows laptop) and returns
-# a paint code for a known VIN. If `docker run` below yields a code, Phase 0
-# is green and the Railway/FastAPI work can proceed.
+# Runs the FastAPI service (service.py), which holds a warm pool of logged-in
+# partslink24 Sessions and exposes GET /lookup-paint and GET /health. Phase 0
+# proved this image's base + the scraper work headless on a Railway datacenter
+# IP; this image turns it into the always-running service coloureg calls.
 #
 # Base image MUST match the Playwright version in requirements.txt
-# (playwright>=1.60). Playwright refuses to find its bundled browser if the
-# image version and the pip package version disagree. The handoff's
-# v1.40.0-jammy is stale relative to the current requirement — we use 1.60.
-#
-# -noble = Ubuntu 24.04, matching Roland's local Ubuntu 24 dev box.
+# (playwright>=1.60) or Playwright won't find its bundled browser.
+# -noble = Ubuntu 24.04.
 FROM mcr.microsoft.com/playwright/python:v1.60.0-noble
 
 # Coherent locale. The scraper sets locale=en-GB / timezone=Europe/London on
@@ -23,34 +20,36 @@ ENV LANG=C.UTF-8 \
 
 WORKDIR /app
 
-# Install Python deps first for layer caching. The browser binaries are ALREADY
-# baked into this base image at /ms-playwright, so we do NOT run
-# `playwright install` — that would download a second copy and can drift from
-# the image's version. Installing the pip package alone is enough; it locates
-# the pre-baked browser via PLAYWRIGHT_BROWSERS_PATH.
+# Install Python deps first for layer caching. Browser binaries are already
+# baked into the base image at /ms-playwright, so we do NOT run
+# `playwright install`.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# App code. Only lookup.py is needed to run; secrets are passed at runtime as
-# env vars (-e), never copied into the image. .env / env.py stay on the host.
+# App code: the scraper plus the service that wraps it. Secrets are passed at
+# runtime as env vars, never copied into the image. .env / env.py stay on the
+# host (and are excluded by .dockerignore).
 COPY lookup.py .
+COPY service.py .
 
-# Run as the non-root user the base image ships (pwuser). Playwright's docs
-# recommend a non-root user for web-scraping / crawling untrusted sites; root
-# also disables the Chromium sandbox. /app is owned by root from the COPYs, so
-# hand pwuser a writable workdir for storage_state.json / _debug / results.csv.
+# Run as the non-root user the base image ships (pwuser). Playwright recommends
+# non-root for scraping; root also disables the Chromium sandbox. /app is owned
+# by root from the COPYs, so give pwuser a writable workdir for any _debug dumps.
 RUN mkdir -p /app/_debug && chown -R pwuser:pwuser /app
 USER pwuser
 
-# Default command runs a single VIN lookup. Override VIN/make at `docker run`
-# time. Credentials come from -e PARTSLINK24_* env vars.
-#   docker run --rm --ipc=host \
-#     -e PARTSLINK24_COMPANY_ID=... \
-#     -e PARTSLINK24_USERNAME=... \
-#     -e PARTSLINK24_PASSWORD=... \
-#     pl24 --vin WBABT32020LS20430 --make BMW --fresh
+# Railway provides $PORT at runtime and routes to it. uvicorn must bind 0.0.0.0
+# on that port. Default 8000 for local `docker run -p 8000:8000`.
+ENV PORT=8000
+EXPOSE 8000
+
+# Run the service. Shell form so $PORT expands at runtime.
+#   docker run --rm --ipc=host -p 8000:8000 \
+#     -e PARTSLINK24_COMPANY_ID=... -e PARTSLINK24_USERNAME=... \
+#     -e PARTSLINK24_PASSWORD=... pl24
+# then: curl "http://localhost:8000/lookup-paint?vin=WBABT32020LS20430&make=BMW"
 #
-# --ipc=host is recommended by Playwright to avoid Chromium running out of
-# shared memory (/dev/shm) and crashing on content-heavy pages.
-ENTRYPOINT ["python", "lookup.py"]
-CMD ["--help"]
+# --ipc=host (on docker run) avoids Chromium running out of /dev/shm on
+# content-heavy pages. On Railway this isn't needed/settable; the noble image
+# + low concurrency (pool size 1) keeps shared-memory pressure low.
+ENTRYPOINT ["sh", "-c", "uvicorn service:app --host 0.0.0.0 --port ${PORT}"]
