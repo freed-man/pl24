@@ -618,20 +618,38 @@ def is_logged_in(page: Page) -> bool:
 
 
 def login(page: Page) -> None:
-    """Run the full login flow. Saves session state on success.
+    """Navigate to the login page and run the full login flow.
+
+    Used for the cold-start case (no saved session at all). When we
+    already have a saved session and only need to re-login after expiry,
+    run() instead lands on the login page via the HOME_URL redirect and
+    calls _complete_login_from_current_page() directly — avoiding a second
+    navigation to the same login.do page.
 
     Note: the dialog handler (auto-accepting JS prompts like the
     squeeze-out confirmation) is registered once on the browser context
     in run(), not here — registering it per-login leaked a fresh handler
     on every call."""
-    p_id = os.environ["PARTSLINK24_COMPANY_ID"]
-    user = os.environ["PARTSLINK24_USERNAME"]
-    pw = os.environ["PARTSLINK24_PASSWORD"]
-
     log("logging in")
     page.goto(LOGIN_URL, wait_until="domcontentloaded")
     handle_attention_page(page)  # bookmark-warning interstitial
     handle_cookie_consent(page)
+    _complete_login_from_current_page(page)
+
+
+def _complete_login_from_current_page(page: Page) -> None:
+    """Fill and submit the login form that is ALREADY present on the
+    current page, then confirm we're logged in and save the session.
+
+    Assumes the caller has already navigated to a partslink24 page that
+    resolves to the login form (either login() after going to LOGIN_URL,
+    or run() after the HOME_URL redirect on an expired session) and has
+    handled the attention/cookie interstitials. This is the shared tail of
+    the login flow, factored out so the expired-session path doesn't have
+    to navigate to login.do a second time."""
+    p_id = os.environ["PARTSLINK24_COMPANY_ID"]
+    user = os.environ["PARTSLINK24_USERNAME"]
+    pw = os.environ["PARTSLINK24_PASSWORD"]
 
     # partslink24 runs an async session check on page load. The result is
     # either: (a) the squeeze-out prompt — a previous session is still
@@ -2235,24 +2253,28 @@ def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
     else:
         # We reused saved cookies — but partslink24 sessions expire and
         # nothing in storage_state.json tells us whether they're still
-        # valid. Visit the home page and check; if the session has
-        # expired, partslink24 will show the login form and we re-log
-        # in cleanly. Without this, every lookup would silently run
-        # against a logged-out browser (catalogs render in demo mode,
-        # VIN inputs stay disabled, all VINs fail with the same error).
-        log("verifying saved session is still valid")
+        # valid. Navigate to the home page ONCE and look at where we land:
+        #   - still logged in  -> the dashboard renders; proceed directly.
+        #   - session expired  -> partslink24 redirects home to login.do
+        #     and shows the login form. Since we're ALREADY on that form,
+        #     we fill it in place (_complete_login_from_current_page) rather
+        #     than calling login(), which would navigate to the same
+        #     login.do page a second time. This single navigation is the
+        #     check: no separate verify trip.
+        log("loading partslink24 (checking session)")
         try:
             page.goto(HOME_URL, wait_until="domcontentloaded", timeout=20_000)
         except PlaywrightTimeoutError:
-            log("could not load home page to verify session; re-logging in")
+            log("could not load partslink24; logging in fresh")
             login(page)
         else:
             handle_attention_page(page)
-            if not is_logged_in(page):
-                log("saved session expired; re-logging in")
-                login(page)
-            else:
+            handle_cookie_consent(page)
+            if is_logged_in(page):
                 log("saved session OK")
+            else:
+                log("saved session expired; re-logging in (in place)")
+                _complete_login_from_current_page(page)
 
     if not skip_brand_check:
         verify_brand_list(page)
