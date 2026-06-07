@@ -70,6 +70,7 @@ python lookup.py --vin WV1ZZZ... --make Volkswagen --category N1
 | `--dump-always` | Dump on **every** result incl. successes (implies headed) — for inspecting a page that returns a wrong/blank value |
 | `--skip-brand-check` | Skip the partslink24 brand-list verification at startup |
 | `--no-fallback` | Disable the dashboard SEARCH VIN fallback |
+| `--delay N` / `--delay LO-HI` | Seconds to wait between VINs (multi-VIN runs only; the first VIN never waits). A single number is a fixed delay; `LO-HI` (e.g. `20-60`) is a randomised range. **Default `0` (off)** — typical one-at-a-time usage doesn't need it; use it to space out a multi-VIN batch or the queue worker. |
 
 ## Output — `results.csv`
 
