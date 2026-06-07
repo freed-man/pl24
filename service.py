@@ -54,7 +54,7 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Header
 from fastapi.responses import JSONResponse
 
 # Load credentials the same way lookup.py's CLI does, so running the service
@@ -81,6 +81,16 @@ from lookup import Session, LookupRow, log
 POOL_SIZE = int(os.environ.get("PL24_POOL_SIZE", "1"))
 SKIP_BRAND_CHECK = os.environ.get("PL24_SKIP_BRAND_CHECK", "") == "1"
 HEADED = os.environ.get("PL24_HEADED", "") == "1"
+
+# Shared secret. When set, /lookup-paint requires header `X-API-Key: <value>`
+# (or `?api_key=<value>`) and rejects anything else with 401. This is what
+# stops the public Railway URL being called by anyone who finds it — only
+# coloureg, which knows the secret, can spend partslink24 effort on the
+# account. If PL24_API_KEY is unset the check is DISABLED (open) — fine for
+# local dev, but it MUST be set in the Railway service for the public URL.
+# /health is intentionally left unauthenticated so Railway's healthcheck and
+# uptime probes can reach it.
+API_KEY = os.environ.get("PL24_API_KEY", "")
 
 _REQUIRED_ENV = ("PARTSLINK24_COMPANY_ID", "PARTSLINK24_USERNAME",
                  "PARTSLINK24_PASSWORD")
@@ -292,6 +302,10 @@ async def lookup_paint(
     category: str | None = Query(None,
                                  description="EU category M1/N1/N2/N3"),
     year: str | None = Query(None, description="model year (currently unused)"),
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
+    api_key: str | None = Query(None,
+                                description="alternative to the X-API-Key "
+                                            "header for the shared secret"),
 ):
     """Look up a paint code for one VIN. Returns the scraper's result as JSON.
 
@@ -299,7 +313,16 @@ async def lookup_paint(
     (e.g. 'not_found_as_routed', 'unsupported_brand', 'brand_unavailable',
     'auth_error') and `error` to decide what to do — typically fall through
     to the manual-lookup offer on the coloureg side.
+
+    Requires the shared secret (X-API-Key header or ?api_key=) when
+    PL24_API_KEY is configured on the service.
     """
+    # Auth: reject unless the shared secret matches (when one is configured).
+    if API_KEY:
+        supplied = x_api_key or api_key
+        if supplied != API_KEY:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+
     if worker is None:
         return JSONResponse({"error": "service not ready"}, status_code=503)
 
