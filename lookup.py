@@ -39,6 +39,8 @@ Usage:
     python lookup.py --skip-brand-check # skip the partslink24 brand-list
                                         # verification at startup
     python lookup.py --no-fallback      # disable dashboard SEARCH VIN fallback
+    python lookup.py --delay 20-60      # wait 20-60s between VINs (multi-VIN
+                                        # runs only; off by default)
 """
 
 import argparse
@@ -649,24 +651,17 @@ def login(page: Page) -> None:
             f"(state={state!r}); see {DEBUG_DIR.name}/login_failed.*"
         )
 
-    # Fill the login form with instant fill(). We briefly used per-
-    # character "human" typing here for anti-detection, but it caused
-    # intermittent login failures ("login data is not valid" — characters
-    # racing/dropping on a re-resolved locator), and a login that fails is
-    # far worse than the theoretical detection it guarded against —
-    # especially since partslink24 sessions drop often, so we log in
-    # frequently and need it rock-solid. fill() is atomic and reliable.
+    # Fill the login form with instant fill() — atomic and reliable.
     page.locator('#login-id').first.fill(p_id)
     page.locator('#login-name').first.fill(user)
     page.locator('#inputPassword').first.fill(pw)
-    page.wait_for_timeout(random.uniform(200, 500))
     page.locator('#login-btn').first.click()
 
-    # After clicking Login, partslink24 may also throw up a squeeze-out
-    # (if a session reappeared between our load and our submit). Give it
-    # a moment, then handle if needed. Jittered (not a fixed 1500ms — a
-    # constant delay is a weak bot signal of its own).
-    page.wait_for_timeout(random.uniform(1_200, 1_900))
+    # After clicking Login, partslink24 may throw up a squeeze-out (if a
+    # session reappeared between our load and our submit). Give the page a
+    # moment to settle into either the dashboard or that popup, then handle
+    # it if present.
+    page.wait_for_timeout(1_500)
     handle_session_squeeze_out(page)
 
     try:
@@ -841,11 +836,6 @@ def submit_vin(page: Page, vin: str, *, source: str) -> tuple[bool, str | None]:
     if not _wait_for_editable(box, timeout_ms=10_000):
         return False, f"{box_name} {editable_suffix}"
     try:
-        # VIN search box uses instant fill: it's a low-value target for
-        # behavioural detection (an in-app search, not the login), and
-        # since the partslink24 session drops frequently this runs often,
-        # so the speed matters. Login typing IS humanised (see login()) —
-        # that's the account-identifying, most-scrutinised action.
         box.fill(vin, timeout=5_000)
         box.press("Enter")
     except PlaywrightTimeoutError:
@@ -2048,7 +2038,7 @@ def lookup_vin_with_retry(page: Page, row: LookupRow, debug: bool,
                       else "browser exception")
             log(f"retrying {row.vin} — {reason} "
                 f"(attempt {attempt + 2}/{EXTRA_RETRIES + 1})")
-            page.wait_for_timeout(random.uniform(1_200, 2_000))
+            page.wait_for_timeout(1_500)
     r.outcome = categorise(r)
     return r
 
@@ -2270,15 +2260,15 @@ def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
     results = []
     lo, hi = inter_vin_delay
     for i, row in enumerate(rows, 1):
-        # Inter-VIN pacing (anti-detection / operating constraint).
-        # partslink24 is a login-gated paid service that can see all
-        # activity server-side; bursty back-to-back lookups on one account
-        # are the behaviour that has caused access problems. Sleep a
-        # randomised interval BEFORE each VIN except the first, so a
-        # single-VIN run never waits but multi-VIN runs (and the future
-        # worker) are spaced out by default. Randomised, not fixed, so the
-        # cadence isn't a clean machine signature. Set --delay 0 to disable
-        # (e.g. fast local iteration where realism doesn't matter).
+        # Inter-VIN pacing — OFF by default (inter_vin_delay defaults to
+        # 0). partslink24 is a login-gated paid service that can see all
+        # activity server-side, and bursty back-to-back lookups on one
+        # account are the behaviour that has historically caused access
+        # problems. Typical usage here is one VIN at a time, so pacing
+        # rarely applies — but pass e.g. --delay 20-60 to space out a
+        # multi-VIN batch (or the future queue worker). When enabled, sleep
+        # a randomised interval BEFORE each VIN except the first, so the
+        # first VIN never waits and the cadence isn't a clean fixed signature.
         if i > 1 and hi > 0:
             pause = random.uniform(lo, hi)
             log(f"pacing: waiting {pause:.0f}s before next VIN")
