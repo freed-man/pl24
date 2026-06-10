@@ -266,7 +266,7 @@ BRAND_CATALOG_SERVICE: dict[str, str] = {
     "MINI Classic": "miniclassic_parts",
     "Mitsubishi": "mmc_parts",
     "Nissan": "nissan_parts",
-    "Opel": "opel_parts",
+    "Opel": "psa_opel_parts",
     "Peugeot": "peugeot_parts",
     "Polestar": "polestar_parts",
     "Porsche": "porsche_parts",
@@ -277,11 +277,25 @@ BRAND_CATALOG_SERVICE: dict[str, str] = {
     "smart": "smart_parts",
     "Suzuki": "suzuki_parts",
     "Toyota": "toyota_parts",
-    "Vauxhall": "vauxhall_parts",
+    "Vauxhall": "psa_vauxhall_parts",
     "Volkswagen": "vw_parts",
     "Volkswagen Classic": "vwclassic_parts",
     "Volkswagen Commercial Vehicles": "vn_parts",
     "Volvo": "volvo_parts",
+}
+
+# Brands partslink24 advertises that we deliberately do NOT route to.
+# partslink24 split Opel/Vauxhall: the LIVE catalogue moved under PSA
+# (psa_opel_parts / psa_vauxhall_parts, which is where BRAND_CATALOG_SERVICE
+# now points), and the old service ids (opel_parts / vauxhall_parts) became
+# "<brand> legacy" catalogues for older vehicles. We route everything to the
+# current PSA catalogue; the legacy catalogues have no make mapping and no
+# routing rule, so we list them here only so verify_brand_list() doesn't keep
+# flagging them as "new/missing" brands. If a real need for the legacy
+# catalogues ever appears, give them a make mapping + routing instead.
+BRANDS_KNOWN_UNROUTED = {
+    "Opel legacy",
+    "Vauxhall legacy",
 }
 
 
@@ -458,7 +472,10 @@ def verify_brand_list(page: Page) -> None:
         return
 
     ours = BRAND_CATALOG_SERVICE
-    missing = {b: s for b, s in advertised.items() if b not in ours}
+    missing = {
+        b: s for b, s in advertised.items()
+        if b not in ours and b not in BRANDS_KNOWN_UNROUTED
+    }
     stale = {b: s for b, s in ours.items() if b not in advertised}
     mismatched = {
         b: (ours[b], advertised[b])
@@ -1156,6 +1173,18 @@ VIN_NOT_FOUND_PHRASES = (
     # best-effort within the poll window; missing it simply reverts to the
     # existing 10s timeout path (still correct, just slower).
     "error while loading vehicle",
+    # The restructured PSA-platform catalogues (Opel/Vauxhall moved under
+    # PSA -> psa_opel_parts / psa_vauxhall_parts, and other Stellantis
+    # brands on the same React/SPA "pl24-app") show this autocomplete-style
+    # message under the VIN box when the catalogue can't resolve the VIN:
+    # "There are no results for the specified search criteria." Without it,
+    # the catalog leg never recognises the not-found, polls the full 10s,
+    # returns a silent timeout, the retry fires for ANOTHER 10s, and the
+    # VIN finally fails as a timeout (~22s) — when the catalogue had in fact
+    # answered "no match" almost instantly. Matching the distinctive core
+    # substring lets the catalog leg fast-fail in ~300ms. Outcome is
+    # unchanged (the VIN genuinely isn't in this catalogue), only far faster.
+    "no results for the specified search",
     "kein fahrzeug",
     "nicht gefunden",
     "vin invalid",
