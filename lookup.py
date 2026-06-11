@@ -34,13 +34,18 @@ Usage:
     python lookup.py --headed           # show browser window
     python lookup.py --vin WVW... --make Volkswagen
     python lookup.py --vin WV1... --make Volkswagen --category N1
-    python lookup.py --debug            # headed + dump HTML on failure
+    python lookup.py --debug            # dump HTML on failure (headless)
+    python lookup.py --dump             # dump HTML for every page (headless)
+    python lookup.py --dump --headed    # ...and show the browser window
     python lookup.py --fresh            # ignore saved session, log in fresh
     python lookup.py --skip-brand-check # skip the partslink24 brand-list
                                         # verification at startup
     python lookup.py --no-fallback      # disable dashboard SEARCH VIN fallback
     python lookup.py --delay 20-60      # wait 20-60s between VINs (multi-VIN
                                         # runs only; off by default)
+
+--debug and --dump control HTML dumping only; add --headed to either to also
+show the browser window. Neither implies the other.
 """
 
 import argparse
@@ -74,10 +79,11 @@ RESULTS_FILE = ROOT / "results.csv"
 DEBUG_DIR = ROOT / "_debug"
 
 # When True, dump_debug artifacts are written for EVERY result page, not
-# just failures — including successful lookups. Set once from the
-# --dump-always CLI flag in run(). Useful for inspecting a page that
-# succeeded but produced a surprising/empty field (e.g. a success with no
-# description), where the normal failure-only --debug dump writes nothing.
+# just failures — including successful lookups. Set once from the --dump
+# CLI flag in run(). Useful for inspecting a page that succeeded but produced
+# a surprising/empty field (e.g. a success with no description), where the
+# normal failure-only --debug dump writes nothing. The internal name stays
+# DUMP_ALWAYS for stability; only the user-facing flag is --dump.
 # Module-level rather than threaded through every lookup function because
 # it's a whole-run CLI switch, not a per-VIN setting.
 DUMP_ALWAYS = False
@@ -1795,7 +1801,7 @@ def _process_result_page(page: Page, vin: str, result: LookupResult,
 
     Returns (True, None) on success or (False, reason) on failure."""
     def dump():
-        # Failure-path dumps: --debug OR --dump-always both write here.
+        # Failure-path dumps: --debug OR --dump both write here.
         if debug or DUMP_ALWAYS:
             dump_debug(page, vin + debug_suffix)
 
@@ -1828,7 +1834,7 @@ def _process_result_page(page: Page, vin: str, result: LookupResult,
     if not result.paint_code:
         dump()
         return False, f"{error_prefix}{no_paint_msg}"
-    # Success path: dump ONLY under --dump-always. Plain --debug must stay
+    # Success path: dump ONLY under --dump. Plain --debug must stay
     # failure-only (its long-standing contract), so we deliberately do not
     # call dump() here — we check DUMP_ALWAYS directly.
     if DUMP_ALWAYS:
@@ -2678,10 +2684,10 @@ def main() -> None:
                                     "reserved for future Classic-catalogue "
                                     "routing)")
     ap.add_argument("--debug", action="store_true",
-                    help="show browser + dump HTML on failure")
-    ap.add_argument("--dump-always", action="store_true",
+                    help="dump HTML on failure (headless unless --headed)")
+    ap.add_argument("--dump", dest="dump_always", action="store_true",
                     help="dump HTML for every result page, including "
-                         "successes (implies headed browser)")
+                         "successes (headless unless --headed)")
     ap.add_argument("--fresh", action="store_true",
                     help="ignore saved session and log in fresh")
     ap.add_argument("--skip-brand-check", action="store_true",
@@ -2732,7 +2738,7 @@ def main() -> None:
 
     with sync_playwright() as pw:
         results = run(pw, rows,
-                      headed=args.headed or args.debug or args.dump_always,
+                      headed=args.headed,
                       debug=args.debug,
                       fresh=args.fresh,
                       skip_brand_check=args.skip_brand_check,

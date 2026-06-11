@@ -62,15 +62,19 @@ python lookup.py --vin WV1ZZZ... --make Volkswagen --category N1
 
 | Flag | What it does |
 |---|---|
-| `--headed` | Show the browser window (watch what happens) |
+| `--headed` | Show the browser window (watch what happens). Add it to `--debug` or `--dump` to also watch while dumping; on its own it just shows the window. |
 | `--vin VIN --make MAKE` | Look up a single VIN instead of `lookups.txt` |
 | `--category N1` | Category for the single-VIN mode (vans, etc.) |
 | `--fresh` | Ignore the saved session and log in clean (was: deleting `storage_state.json` by hand) |
-| `--debug` | Headed + dump HTML/screenshot to `_debug/<vin>.{html,png}` on failure (`_debug/` is wiped at the start of each debug run) |
-| `--dump-always` | Dump on **every** result incl. successes (implies headed) — for inspecting a page that returns a wrong/blank value |
+| `--debug` | Dump HTML/screenshot to `_debug/<vin>.{html,png}` **on failure** (`_debug/` is wiped at the start of each run). Headless by default — add `--headed` to watch. |
+| `--dump` | Dump on **every** result incl. successes — for inspecting a page that returns a wrong/blank value. Headless by default — add `--headed` to watch. (Renamed from `--dump-always`; no longer forces a window.) |
 | `--skip-brand-check` | Skip the partslink24 brand-list verification at startup |
 | `--no-fallback` | Disable the dashboard SEARCH VIN fallback |
 | `--delay N` / `--delay LO-HI` | Seconds to wait between VINs (multi-VIN runs only; the first VIN never waits). A single number is a fixed delay; `LO-HI` (e.g. `20-60`) is a randomised range. **Default `0` (off)** — typical one-at-a-time usage doesn't need it; use it to space out a multi-VIN batch or the queue worker. |
+
+`--debug` and `--dump` control HTML dumping only and run **headless** unless
+you also pass `--headed`. Neither implies the other — this changed (they used
+to force a window); pass `--headed` explicitly when you want to watch.
 
 ## Output — `results.csv`
 
@@ -91,8 +95,9 @@ Via, Outcome, Error`.
 Selectors are best-effort because partslink24's routes differ by
 manufacturer subscription. If a step fails:
 
-1. Run with `--debug` and watch where it stops (and check the dumped
-   `_debug/<vin>.html` / `.png`).
+1. Run with `--debug --headed` and watch where it stops (and check the
+   dumped `_debug/<vin>.html` / `.png`). `--debug` alone dumps headless; add
+   `--headed` when you want to watch the browser live.
 2. Inspect the field that should have been filled; copy its `name` or a
    unique attribute.
 3. Add it to the relevant locator/extractor in `lookup.py`:

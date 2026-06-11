@@ -398,10 +398,11 @@ recoveries) in the data.
 
 ## Tips
 
-- For any uncertain error, run with `--debug` (visible browser + HTML/PNG
-  dumps in `_debug/<vin>.{html,png}` on failure; `_debug/` wiped at the
-  start of each run). Use `--dump-always` to dump on *every* result,
-  including successes (implies headed).
+- For any uncertain error, run with `--debug` (dumps HTML/PNG to
+  `_debug/<vin>.{html,png}` on failure; `_debug/` wiped at the start of each
+  run). Use `--dump` to dump on *every* result, including successes. Both run
+  **headless by default** — add `--headed` to watch the browser live (e.g.
+  `--debug --headed`). Neither flag implies a window any more.
 - For login problems, `--fresh` ignores the saved session and starts clean.
 - Batch runs keep going on failure — one bad VIN doesn't stop the rest.
   But run **one VIN at a time, spaced out** in normal use (see NOTES.md /
