@@ -2418,14 +2418,62 @@ class Session:
         lookup_vin_with_retry the CLI uses, so per-VIN retry/fallback
         behaviour is identical.
 
-        Caller must hold a lock around this — one VIN at a time."""
+        Caller must hold a lock around this — one VIN at a time.
+
+        Stale-session self-heal: _ensure_logged_in() uses the cheap
+        is_logged_in() DOM check, which a HALF-ALIVE session can fool — the
+        leftover page from the previous lookup still looks logged in (no
+        password field), so we proceed, but the session is too stale to load
+        a fresh catalogue and the catalog leg fails with `catalog_ui_error`
+        (VIN box never rendered/became editable). That is a CLEAN result, not
+        an exception, so the service's crash-retry (exception-only) doesn't
+        catch it and the user sees a false miss they have to re-submit by
+        hand. Here we detect that specific signature, force a full re-login
+        (not the cheap check — that's what was fooled), and retry the lookup
+        once. Genuine outcomes (not_found_as_routed, name_only,
+        brand_unavailable, success) are NOT this signature, so they're never
+        retried. The retry can only turn a false miss into a real result or
+        leave it unchanged — never worse."""
         if self._page is None:
             raise RuntimeError("Session.lookup() called before start()")
         self._ensure_logged_in()
-        return lookup_vin_with_retry(
+        result = lookup_vin_with_retry(
             self._page, row, debug=debug,
             allow_dashboard_fallback=self._allow_dashboard_fallback,
         )
+        # Half-alive-session self-heal: a catalog_ui_error with no code is the
+        # stale-session tell. Force a real re-login and retry once.
+        if result.outcome == "catalog_ui_error" and not result.paint_code:
+            log(f"catalog_ui_error for {row.vin} — likely stale session; "
+                f"forcing re-login and retrying once")
+            self._force_relogin()
+            result = lookup_vin_with_retry(
+                self._page, row, debug=debug,
+                allow_dashboard_fallback=self._allow_dashboard_fallback,
+            )
+        return result
+
+    def _force_relogin(self) -> None:
+        """Unconditionally re-establish the login, bypassing the cheap
+        is_logged_in() check (which a half-alive session can pass while still
+        being too stale to work). Navigate home — which redirects to the
+        login form when the session is dead — and complete login in place;
+        fall back to a full login() if the navigation itself fails."""
+        try:
+            self._page.goto(HOME_URL, wait_until="domcontentloaded",
+                            timeout=20_000)
+        except PlaywrightTimeoutError:
+            login(self._page, save_state=self._save_state)
+            return
+        handle_attention_page(self._page)
+        handle_cookie_consent(self._page)
+        if is_logged_in(self._page):
+            # Session turned out still valid (the catalog_ui_error was a
+            # transient render glitch, not expiry) — nothing to re-login,
+            # the retry will just run again on the live session.
+            return
+        _complete_login_from_current_page(self._page,
+                                          save_state=self._save_state)
 
     def is_alive(self) -> bool:
         """Best-effort check that the browser is still connected. The
