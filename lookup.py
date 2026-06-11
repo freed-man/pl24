@@ -95,6 +95,40 @@ CATALOG_URL_TEMPLATE = (
 # "maximum total attempts".
 EXTRA_RETRIES = 1
 
+# Proactive re-login threshold (seconds) for the long-lived service session.
+# A partslink24 session survives idle for a while (empirically measured at
+# 15+ minutes — it outlives the 600s access token, which refreshes silently
+# underneath), and any successful lookup refreshes it. The service tracks the
+# time since the session last did real work (Session.last_interaction); when a
+# request arrives after a longer idle gap than this, the session is PROBABLY
+# stale, so we re-login BEFORE attempting the lookup instead of letting the
+# attempt fail and recovering via the catalog_ui_error self-heal (which costs
+# a wasted ~5s failed attempt + the re-login). This is a SPEED optimisation,
+# not a correctness mechanism: the self-heal in lookup() remains the backstop
+# for sessions that die *within* the window (e.g. a squeeze-out by another
+# login), so this threshold being slightly wrong only changes whether a stale
+# lookup is fast (pre-empted here) or slow (healed there) — never whether it's
+# correct. Default 900s (15 min) = the measured-safe lower bound; tune via the
+# PL24_SESSION_IDLE_S env var (Railway dashboard) with no code change. A value
+# of 0 disables the proactive check (self-heal still covers staleness).
+SESSION_IDLE_RELOGIN_S = float(os.environ.get("PL24_SESSION_IDLE_S", "900"))
+
+# Outcomes that PROVE the session was alive when the lookup ran (partslink24
+# served a real catalogue/dashboard response). Reaching any of these refreshes
+# the session, so Session.last_interaction is updated to "now" after them. The
+# COMPLEMENT — catalog_ui_error / auth_error / page_load_timeout / unknown —
+# means the session was dead or never engaged, so we do NOT treat those as a
+# refresh (updating the clock on a failed-because-dead lookup would wrongly
+# mark a dead session "fresh" and suppress the next proactive re-login).
+_SESSION_PROVEN_ALIVE_OUTCOMES = frozenset({
+    "success",
+    "name_only",
+    "not_found_as_routed",
+    "unsupported_brand",
+    "brand_unavailable",
+    "paint_data_missing",
+})
+
 
 # ---------- VDG make -> partslink24 brand -----------------------------------
 
@@ -2372,6 +2406,27 @@ class Session:
         self._browser = None
         self._context = None
         self._page = None
+        # Monotonic timestamp of the last activity that PROVED the session was
+        # alive (login, or a lookup that reached partslink24). Drives the
+        # proactive idle re-login in lookup(). In-memory and process-local —
+        # the worker holds one session for its lifetime, so this persists
+        # across requests without any datastore, and a worker restart correctly
+        # resets it (a fresh process means a fresh login). None until start().
+        self._last_interaction: float | None = None
+
+    def _mark_interaction(self) -> None:
+        """Record that the session just did real work (is alive now). Called
+        after login and after any lookup whose outcome proves partslink24
+        served a response, so the proactive idle check measures from the last
+        time the session was known-good."""
+        self._last_interaction = time.monotonic()
+
+    def _idle_seconds(self) -> float | None:
+        """Seconds since the session last proved alive, or None if it has not
+        been established yet (no start())."""
+        if self._last_interaction is None:
+            return None
+        return time.monotonic() - self._last_interaction
 
     def start(self) -> None:
         """Launch the browser, log in, and (optionally) verify the brand
@@ -2386,6 +2441,8 @@ class Session:
         _establish_session(self._page, save_state=self._save_state)
         if not self._skip_brand_check:
             verify_brand_list(self._page)
+        # Fresh login => session is alive now; start the idle clock.
+        self._mark_interaction()
 
     def _ensure_logged_in(self) -> None:
         """Cheap per-request session validity check + in-place re-login.
@@ -2420,29 +2477,59 @@ class Session:
 
         Caller must hold a lock around this — one VIN at a time.
 
-        Stale-session self-heal: _ensure_logged_in() uses the cheap
-        is_logged_in() DOM check, which a HALF-ALIVE session can fool — the
-        leftover page from the previous lookup still looks logged in (no
-        password field), so we proceed, but the session is too stale to load
-        a fresh catalogue and the catalog leg fails with `catalog_ui_error`
-        (VIN box never rendered/became editable). That is a CLEAN result, not
-        an exception, so the service's crash-retry (exception-only) doesn't
-        catch it and the user sees a false miss they have to re-submit by
-        hand. Here we detect that specific signature, force a full re-login
-        (not the cheap check — that's what was fooled), and retry the lookup
-        once. Genuine outcomes (not_found_as_routed, name_only,
-        brand_unavailable, success) are NOT this signature, so they're never
-        retried. The retry can only turn a false miss into a real result or
-        leave it unchanged — never worse."""
+        Three layers keep a long-lived session healthy without background
+        pinging (which would be a bot signal and round-the-clock waste):
+
+        1. PROACTIVE idle re-login (fast path for the predictable case). The
+           session survives idle for a while and every lookup refreshes it
+           (measured), so if a request arrives after a longer idle gap than
+           SESSION_IDLE_RELOGIN_S the session is PROBABLY dead — we re-login
+           BEFORE attempting, turning a ~38s fail-then-heal into a ~10s clean
+           re-login. Tunable via PL24_SESSION_IDLE_S (0 disables).
+
+        2. Cheap per-request check (_ensure_logged_in): is_logged_in() with no
+           navigation, re-logs-in in place if the session is plainly dead.
+
+        3. Self-heal backstop (the unpredictable case). _ensure_logged_in's
+           cheap check can be FOOLED by a HALF-ALIVE session — the leftover
+           page from the previous lookup still looks logged in, so we proceed,
+           but the session is too stale to load a fresh catalogue and the
+           catalog leg fails with `catalog_ui_error` (a CLEAN result, not an
+           exception, so the service's crash-retry misses it and the user sees
+           a false miss). We detect that signature, force a real re-login, and
+           retry once. This also covers sessions that die WITHIN the proactive
+           window (e.g. a squeeze-out by another login) — so layer 1 being a
+           guess only changes whether a stale lookup is fast or slow, never
+           whether it's correct. Genuine outcomes (not_found_as_routed,
+           name_only, etc.) are never the catalog_ui_error signature, so they
+           are never retried.
+
+        After the lookup, last_interaction is refreshed iff the outcome proves
+        the session served a real response (so clustered lookups stay warm and
+        a failed-because-dead lookup does NOT reset the idle clock)."""
         if self._page is None:
             raise RuntimeError("Session.lookup() called before start()")
+
+        # Layer 1 — proactive idle re-login. If the session has been idle
+        # longer than the threshold, it is probably stale; re-login up front
+        # rather than discovering it via a failed attempt + self-heal. Skipped
+        # when the threshold is 0 (disabled) or the idle time is unknown.
+        idle = self._idle_seconds()
+        if (SESSION_IDLE_RELOGIN_S > 0 and idle is not None
+                and idle > SESSION_IDLE_RELOGIN_S):
+            log(f"session idle {idle:.0f}s > {SESSION_IDLE_RELOGIN_S:.0f}s "
+                f"threshold — proactively re-logging in before lookup")
+            self._force_relogin()
+            self._mark_interaction()
+
+        # Layer 2 — cheap validity check + in-place re-login if plainly dead.
         self._ensure_logged_in()
         result = lookup_vin_with_retry(
             self._page, row, debug=debug,
             allow_dashboard_fallback=self._allow_dashboard_fallback,
         )
-        # Half-alive-session self-heal: a catalog_ui_error with no code is the
-        # stale-session tell. Force a real re-login and retry once.
+        # Layer 3 — half-alive-session self-heal: a catalog_ui_error with no
+        # code is the stale-session tell. Force a real re-login and retry once.
         if result.outcome == "catalog_ui_error" and not result.paint_code:
             log(f"catalog_ui_error for {row.vin} — likely stale session; "
                 f"forcing re-login and retrying once")
@@ -2451,6 +2538,13 @@ class Session:
                 self._page, row, debug=debug,
                 allow_dashboard_fallback=self._allow_dashboard_fallback,
             )
+
+        # Refresh the idle clock iff the (final) outcome proves the session
+        # reached partslink24. Failures that signal a dead/unengaged session
+        # (catalog_ui_error, auth_error, page_load_timeout, unknown) do NOT
+        # count — leaving the clock stale so the next request re-logs-in.
+        if result.outcome in _SESSION_PROVEN_ALIVE_OUTCOMES:
+            self._mark_interaction()
         return result
 
     def _force_relogin(self) -> None:
