@@ -83,7 +83,8 @@ Via, Outcome, Error`.
 
 - `Paint description` — colour name where partslink24 carries one.
 - `Via` — which leg resolved it: `catalog`, `catalog:commercial`,
-  `catalog:classic`, or `dashboard`.
+  `catalog:classic`, `catalog:legacy` (Opel/Vauxhall old catalogue), or
+  `dashboard`.
 - `Outcome` — machine-parseable status (`success`, `name_only`,
   `paint_data_missing`, `brand_unavailable`, `not_found_as_routed`,
   `unsupported_brand`, `page_load_timeout`, `catalog_ui_error`,

@@ -324,18 +324,38 @@ BRAND_CATALOG_SERVICE: dict[str, str] = {
     "Volvo": "volvo_parts",
 }
 
-# Brands partslink24 advertises that we deliberately do NOT route to.
 # partslink24 split Opel/Vauxhall: the LIVE catalogue moved under PSA
-# (psa_opel_parts / psa_vauxhall_parts, which is where BRAND_CATALOG_SERVICE
-# now points), and the old service ids (opel_parts / vauxhall_parts) became
-# "<brand> legacy" catalogues for older vehicles. We route everything to the
-# current PSA catalogue; the legacy catalogues have no make mapping and no
-# routing rule, so we list them here only so verify_brand_list() doesn't keep
-# flagging them as "new/missing" brands. If a real need for the legacy
-# catalogues ever appears, give them a make mapping + routing instead.
+# (psa_opel_parts / psa_vauxhall_parts, where BRAND_CATALOG_SERVICE points for
+# the base brands), and the old service ids (opel_parts / vauxhall_parts)
+# became "<brand> legacy" catalogues for OLDER vehicles. partslink24 still
+# advertises the legacy catalogues on its home grid under these names, so they
+# stay in BRANDS_KNOWN_UNROUTED to keep verify_brand_list() from flagging them
+# as new/unknown brands. They are NOT added to BRAND_CATALOG_SERVICE on
+# purpose: that map is verified against the home grid's exact service ids, and
+# the legacy catalogues are reached only as a fallback (see LEGACY_SIBLING /
+# LEGACY_CATALOG_SERVICE below), not as a routed base brand — so keeping them
+# out of BRAND_CATALOG_SERVICE avoids a spurious id-mismatch warning.
 BRANDS_KNOWN_UNROUTED = {
     "Opel legacy",
     "Vauxhall legacy",
+}
+
+# Old-car sibling for GM's PSA split: when the live PSA catalogue fails to
+# IDENTIFY an Opel/Vauxhall (e.g. a pre-PSA-era vehicle), retry against the
+# legacy catalogue before falling through to the dashboard. Same mechanism and
+# the same "only on a genuine not-found, not on paint-code-not-found" guard as
+# CLASSIC_SIBLING. Confirmed need: a 2006 Vauxhall Astra (W0L0AHL...) returns
+# "no results" on psa_vauxhall_parts but resolves to 4CU on Vauxhall legacy.
+# Kept separate from BRAND_CATALOG_SERVICE (see note above) with the legacy
+# service ids in their own map so the fallback can build the catalogue URL
+# without the legacy names being treated as routed base brands.
+LEGACY_SIBLING: dict[str, str] = {
+    "Opel": "Opel legacy",
+    "Vauxhall": "Vauxhall legacy",
+}
+LEGACY_CATALOG_SERVICE: dict[str, str] = {
+    "Opel legacy": "opel_parts",
+    "Vauxhall legacy": "vauxhall_parts",
 }
 
 
@@ -402,7 +422,11 @@ def resolve_brand(make: str | None, category: str | None) -> tuple[str | None, s
 
 
 def catalog_url_for_brand(brand: str) -> str | None:
-    svc = BRAND_CATALOG_SERVICE.get(brand)
+    # Base brands live in BRAND_CATALOG_SERVICE (verified against the home
+    # grid); the Opel/Vauxhall legacy catalogues are reached only as a
+    # fallback and live in LEGACY_CATALOG_SERVICE (kept out of the verified
+    # map on purpose — see the LEGACY_SIBLING note).
+    svc = BRAND_CATALOG_SERVICE.get(brand) or LEGACY_CATALOG_SERVICE.get(brand)
     return CATALOG_URL_TEMPLATE.format(svc) if svc else None
 
 
@@ -1986,6 +2010,29 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
                 return result
             log(f"Classic sibling failed: {err}")
             catalog_error = f"{catalog_error}; {classic}: {err}"
+            last_leg_error = err
+
+        # Legacy-sibling retry (Opel/Vauxhall only): partslink24 moved the
+        # live Opel/Vauxhall catalogue under PSA and kept the old catalogue as
+        # a "legacy" one for pre-PSA-era vehicles. Same shape as Classic above
+        # — try the live (PSA) catalogue first, fall back to legacy only if it
+        # failed to identify the vehicle. Skip on "paint code not found" for
+        # the same reason as Classic: the PSA catalogue positively identified
+        # the car (page loaded, no code), so legacy can't supply a code
+        # partslink24 doesn't have, and trying would just burn a ~10s timeout.
+        # Confirmed: 2006 Vauxhall Astra "no results" on PSA -> 4CU on legacy.
+        legacy = LEGACY_SIBLING.get(brand)
+        if (legacy and legacy in LEGACY_CATALOG_SERVICE
+                and "paint code not found" not in (last_leg_error or "").lower()):
+            log(f"trying Legacy sibling: {legacy}")
+            result.paint_code = ""
+            result.paint_description = ""
+            ok, err = _try_catalog(page, row.vin, legacy, result, debug)
+            if ok:
+                result.via = "catalog:legacy"
+                return result
+            log(f"Legacy sibling failed: {err}")
+            catalog_error = f"{catalog_error}; {legacy}: {err}"
             last_leg_error = err
     else:
         # No brand resolvable, or brand has no catalog. Fall through to

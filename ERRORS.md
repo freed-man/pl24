@@ -178,14 +178,31 @@ message is still in the frame HTML, which `BRAND_UNAVAILABLE_RE` matches
 
 ---
 
-## Multi-leg fallback chains (Mercedes, Fiat, Ford, Classic-sibling brands)
+## Multi-leg fallback chains (Mercedes, Fiat, Ford, Classic-sibling brands, Opel/Vauxhall legacy)
 
 Commercial vehicles (MB Vans↔Trucks, Fiat↔Fiat Professional, Ford↔Ford
-Pro) and Classic-sibling brands (BMW, MINI, Mercedes, Porsche, VW, BMW
-Motorrad) may try multiple catalogues before the dashboard. The error
-string concatenates every leg separated by `; `, and the **`Via`** column
-now records which leg won: `catalog`, `catalog:commercial`,
-`catalog:classic`, or `dashboard`.
+Pro), Classic-sibling brands (BMW, MINI, Mercedes, Porsche, VW, BMW
+Motorrad), and Opel/Vauxhall (live PSA catalogue ↔ legacy catalogue) may try
+multiple catalogues before the dashboard. The error string concatenates every
+leg separated by `; `, and the **`Via`** column now records which leg won:
+`catalog`, `catalog:commercial`, `catalog:classic`, `catalog:legacy`, or
+`dashboard`. Full walk order: routed catalogue → commercial sibling → Classic
+sibling → Legacy sibling → dashboard.
+
+### `no results for the specified search; Vauxhall legacy: ... ` → `catalog:legacy`
+
+Opel/Vauxhall split: partslink24 moved the LIVE Opel/Vauxhall catalogue under
+PSA (`psa_opel_parts` / `psa_vauxhall_parts`) and kept the OLD catalogue
+(`opel_parts` / `vauxhall_parts`) as a "legacy" catalogue for pre-PSA-era
+vehicles. The live PSA catalogue returns "no results" for older cars; we then
+fall back to the legacy catalogue before the dashboard. Confirmed working:
+`W0L0AHL3565157973` (2006 Vauxhall Astra) returns "no results" on
+`psa_vauxhall_parts` and resolves to `4CU` (Color Option) on Vauxhall legacy
+→ `via=catalog:legacy`. Same skip rule as Classic: not tried on "paint code
+not found" (the PSA catalogue positively identified the car, so legacy can't
+add a code partslink24 doesn't have). Routing lives in `LEGACY_SIBLING` /
+`LEGACY_CATALOG_SERVICE`; the legacy names stay in `BRANDS_KNOWN_UNROUTED` so
+the brand-list verify doesn't flag them.
 
 ### `vehicle data did not load (timeout); Mercedes-Benz Trucks: ... ; Mercedes-Benz Classic: ... ; dashboard fallback: ...`
 
@@ -202,8 +219,8 @@ dashboard. Catches mis-categorised Doblòs etc. on the M1/N1 boundary.
 ### Skip rules (so legs aren't wasted)
 
 - On **"paint code not found"** the vehicle WAS identified in the modern
-  catalogue, so it's definitively not a Classic/commercial/dashboard case:
-  all three are **skipped** (the description survives the skip →
+  catalogue, so it's definitively not a Classic/commercial/legacy/dashboard
+  case: all are **skipped** (the description survives the skip →
   `name_only`). This avoids ~10s timeouts on modern MINIs/BMWs etc.
 - On **"brand unavailable"** the commercial sibling and dashboard are
   skipped (same disabled catalogue).
