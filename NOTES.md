@@ -91,7 +91,72 @@ Via, Outcome, Error`.
   `auth_error`, `missing_input`, `unknown`). See `ERRORS.md` for the full
   meaning of each and how to triage.
 
-## If something breaks
+## Deployed worker (Railway)
+
+Besides the CLI, `lookup.py`'s `Session` class is driven by `service.py`, a
+small FastAPI worker deployed on Railway that coloureg calls over the private
+network (`GET /lookup-paint?vin=…&make=…&category=…`, gated by an API key;
+`/health` is unauthenticated). The worker holds **one** logged-in partslink24
+session warm for its lifetime and serialises requests through it
+(`pool_size=1` — never run two concurrent sessions on the same credential, it
+triggers partslink24's squeeze-out / looks like abuse). All of the
+session-management logic below lives in `Session` so it applies to any caller;
+the CLI doesn't exercise it because each `python lookup.py` run does one
+lookup against a fresh session and exits.
+
+### Keeping the long-lived session healthy
+
+A warm partslink24 session expires after a while, and the cheap "am I logged
+in?" DOM check can be fooled by a HALF-ALIVE session (the leftover page from
+the previous lookup still looks logged in, but the session is too stale to
+load a fresh catalogue). `Session.lookup()` handles this with three layers,
+in order, so the common case is fast and every case stays correct:
+
+1. **Proactive idle re-login** (fast path). The session tracks the time since
+   it last did real work (`last_interaction`, in-memory — no datastore; it
+   resets correctly on worker restart). If a request arrives after a longer
+   idle gap than the threshold, the session is *probably* stale, so we
+   re-login **before** attempting — turning a ~38s fail-then-heal into a ~10s
+   clean re-login. Any successful lookup refreshes the clock, so clustered
+   lookups stay warm and never trigger a needless re-login.
+2. **Cheap per-request check** (`_ensure_logged_in`) — a no-navigation DOM
+   check that re-logs-in in place if the session is plainly dead.
+3. **Self-heal backstop** (the unpredictable case). If a lookup still fails
+   with `catalog_ui_error` and no code — the half-alive signature, also
+   covering a session killed *within* the idle window by a squeeze-out — we
+   force a real re-login (bypassing the cheap check that was fooled) and retry
+   the lookup once. Look for `catalog_ui_error … forcing re-login and retrying
+   once` in the worker log. Genuine outcomes (`not_found_as_routed`,
+   `name_only`, etc.) are never this signature, so they're never retried.
+
+Because layer 3 guarantees correctness, layer 1's threshold being slightly
+wrong only changes whether a stale lookup is *fast* or *slow*, never whether
+it's *correct*. The idle clock is refreshed only on outcomes that prove the
+session reached partslink24 (`success`, `name_only`, `not_found_as_routed`,
+`unsupported_brand`, `brand_unavailable`, `paint_data_missing`) — a
+failed-because-dead lookup deliberately does **not** reset it.
+
+Measured (Jun 2026, against the live worker): a session survives **≥23 min**
+idle and each successful lookup refreshes it — it outlives the 600s access
+token, which refreshes silently underneath. The proactive threshold default
+(900s / 15 min) is therefore conservative; it can be raised once you're
+confident in the ceiling.
+
+### Worker environment variables (Railway dashboard)
+
+| Var | Default | Meaning |
+|---|---|---|
+| `PL24_SESSION_IDLE_S` | `900` | Proactive re-login threshold in seconds (idle since last interaction). `0` disables the proactive check (self-heal still covers staleness). Tune here — no code change/redeploy. |
+| `PL24_POOL_SIZE` | `1` | Warm-session count. **Keep at 1** — concurrent sessions on one credential trigger partslink24's squeeze-out. |
+| `PL24_API_KEY` | — | Shared secret coloureg sends as `X-API-Key` / `?api_key=`. |
+| `PL24_REQUEST_TIMEOUT_S` | `60` | Per-request timeout for the worker's queue. |
+| `PL24_HEADED` | off | Run the worker's browser headed (debugging only; normally headless). |
+| `PARTSLINK24_*` | — | partslink24 credentials. |
+
+`service.py` itself needs no per-VIN changes when editing `Session`; the HTTP
+plumbing and queue are independent of the session-health logic.
+
+
 
 Selectors are best-effort because partslink24's routes differ by
 manufacturer subscription. If a step fails:

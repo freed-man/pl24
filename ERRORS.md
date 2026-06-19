@@ -388,7 +388,7 @@ human-readable `Error`. Values:
 | `unsupported_brand` | Make not in `MAKE_TO_BRAND` (Honda, Maserati, Subaru, Tesla, Isuzu, Lotus, Genesis) |
 | `paint_data_missing` | Page loaded but no code AND no name (IVECO, MAN, old Alfa, empty-cell Ford) |
 | `page_load_timeout` | Catalog/dashboard never returned data within the timeout — **often transient, re-run** |
-| `catalog_ui_error` | VIN input never became visible or editable |
+| `catalog_ui_error` | VIN input never became visible or editable. On the **deployed worker** this is also the half-alive-stale-session signature: the worker forces a re-login and retries once (see NOTES.md "Deployed worker"). On the CLI it's reported as-is. |
 | `auth_error` | Login or session-validation failure |
 | `missing_input` | Empty make column |
 | `unknown` | Anything not yet categorised — investigate if seen |
