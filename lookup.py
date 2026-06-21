@@ -1303,6 +1303,59 @@ def collect_all_text(page: Page) -> str:
     return "\n".join(parts)
 
 
+def _handle_model_picker(page: Page) -> bool:
+    """Some VINs (notably older Mercedes) don't resolve to a single vehicle:
+    partslink24 shows a "Please select:" dropdown of sales-type variants
+    (different markets — 'Valid for: AU/JP/CA,US' or unmarked) and waits for
+    a pick before loading the vehicle page with the paint code. Without
+    handling this, the page never shows vehicle data, so wait_for_vehicle_data
+    times out (then the silent-retry + every fallback leg + the B2 transient
+    retry all hit the same picker — ~2 min of dead waiting ending in a false
+    not-found).
+
+    Empirically (WDB2010242F790734, a UK 190E): EVERY sales-type variant
+    resolves to the SAME Paint Code (441) — they differ only in parts
+    catalogue/market, not paint. So auto-picking the first option is SAFE: it
+    cannot pick a "wrong colour", because the colour is identical across
+    variants. (If a future VIN is found where variants carry different paint
+    codes, this assumption would need revisiting — but the observed Mercedes
+    behaviour is shared paint across sales-types.)
+
+    Returns True if a picker was found and an option was clicked (caller should
+    keep waiting for the vehicle data to load), False if no picker was present.
+    """
+    # The picker is a dropdown under a "Please select:" title; each variant is
+    # an _item_yt7ex_27 row, the first of which is the title itself.
+    title = page.locator('div._item_yt7ex_27._itemTitle_yt7ex_44',
+                          has_text="Please select").first
+    try:
+        if not title.count() or not title.is_visible():
+            return False
+    except Exception:
+        return False
+    # Click the first SELECTABLE option (an _item_yt7ex_27 that is NOT the
+    # title and NOT the camera-scan icon row from the other dropdown panel).
+    # Picking any is safe (same paint code); first is simplest. Scoped by
+    # has_text="Type code" so we only ever match real sales-type rows.
+    options = page.locator(
+        'div._item_yt7ex_27:not(._itemTitle_yt7ex_44):not(._iconItem_yt7ex_51)',
+        has_text="Type code")
+    try:
+        n = options.count()
+    except Exception:
+        return False
+    if not n:
+        return False
+    log("model picker ('Please select') detected -> picking first sales-type "
+        "(all variants share the same paint code)")
+    try:
+        options.first.click()
+    except Exception as exc:
+        log(f"model picker click failed: {exc!r}")
+        return False
+    return True
+
+
 def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
     waited = 0
     # Tight polling (300ms) so we detect the data within ~300ms of when
@@ -1311,9 +1364,19 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
     # win on fast pages is worth the small extra CPU.
     interval = 300
     text = ""
+    picker_handled = False
     while waited < timeout_ms:
         text = collect_all_text(page)
         lower = text.lower()
+        # Model-disambiguation picker: if present, click a variant once and
+        # keep waiting for the vehicle page it loads. Guarded by a flag so we
+        # only auto-pick once (a re-appearing picker would otherwise loop).
+        if not picker_handled and "please select" in lower:
+            if _handle_model_picker(page):
+                picker_handled = True
+                page.wait_for_timeout(interval)
+                waited += interval
+                continue
         if BRAND_UNAVAILABLE_RE.search(text):
             return text
         if any(p in lower for p in VIN_NOT_FOUND_PHRASES):
