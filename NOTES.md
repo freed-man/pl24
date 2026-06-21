@@ -91,6 +91,12 @@ Via, Outcome, Error`.
   `auth_error`, `missing_input`, `unknown`). See `ERRORS.md` for the full
   meaning of each and how to triage.
 
+Some VINs (notably older multi-variant Mercedes) show a `Please select:`
+sales-type picker instead of resolving straight to a vehicle. pl24
+auto-clicks the first variant and continues — safe because all variants of a
+given VIN share the same paint code (confirmed; the sales-types differ only
+by market/parts-catalogue). See the "Model picker" note in `ERRORS.md`.
+
 ## Deployed worker (Railway)
 
 Besides the CLI, `lookup.py`'s `Session` class is driven by `service.py`, a

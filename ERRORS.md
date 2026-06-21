@@ -155,6 +155,29 @@ Jeep), and some brands exclude pre-2006 (Jeep states this explicitly).
 The dashboard's universal search can't pick a brand. Malformed,
 foreign-market, or genuinely not in partslink24.
 
+### Model picker (`Please select:`) — auto-handled, older Mercedes etc.
+
+Some VINs don't resolve to a single vehicle: partslink24 shows a
+`Please select:` dropdown of sales-type variants (different markets, e.g.
+`Valid for: AU` / `JP` / `CA, US` or unmarked) and waits for a pick before
+loading the vehicle page with the paint code. `wait_for_vehicle_data` detects
+this picker during its normal poll and auto-clicks the first sales-type, then
+keeps waiting for the vehicle page (handled in `_handle_model_picker`).
+
+**Why auto-picking is safe:** confirmed on `WDB2010242F790734` (a UK 1991
+190 E) — clicking *every* variant resolves to the **same** Paint Code (`441`);
+the sales-types differ only in parts catalogue/market, not paint. So picking
+the first cannot produce a wrong colour. If a future VIN is ever found where
+variants carry *different* paint codes, this assumption needs revisiting, but
+the observed Mercedes behaviour is shared paint across sales-types.
+
+Before this was handled, such VINs timed out on every leg (catalog → silent
+retry → Classic sibling → dashboard) and then the B2 transient-retry ran the
+whole chain again — ~2 min ending in a false `not_found_as_routed`. Now the
+picker is clicked in ~1s and the first leg succeeds (`441`, `via=catalog`),
+so the slow chain never runs. Look for `model picker ('Please select')
+detected -> picking first sales-type` in the log.
+
 ---
 
 ## Brand-unavailable (partslink24 switched VIN-ID off)
