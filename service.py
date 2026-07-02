@@ -46,13 +46,12 @@ Config via env (all optional except credentials, which lookup.py requires):
                           the container)
 """
 
+import hmac
 import os
 import queue
 import threading
 import time
-import uuid
 from contextlib import asynccontextmanager
-from dataclasses import asdict
 
 from fastapi import FastAPI, Query, Header
 from fastapi.responses import JSONResponse
@@ -83,7 +82,9 @@ SKIP_BRAND_CHECK = os.environ.get("PL24_SKIP_BRAND_CHECK", "") == "1"
 HEADED = os.environ.get("PL24_HEADED", "") == "1"
 
 # Shared secret. When set, /lookup-paint requires header `X-API-Key: <value>`
-# (or `?api_key=<value>`) and rejects anything else with 401. This is what
+# and rejects anything else with 401. HEADER ONLY — a ?api_key= query
+# alternative used to exist and was removed: query strings land verbatim in
+# uvicorn/Railway access logs, which would leak the secret. This is what
 # stops the public Railway URL being called by anyone who finds it — only
 # coloureg, which knows the secret, can spend partslink24 effort on the
 # account. If PL24_API_KEY is unset the check is DISABLED (open) — fine for
@@ -251,12 +252,17 @@ class PoolWorker:
 # ---------------------------------------------------------------------------
 worker: PoolWorker | None = None
 
-# Hard ceiling on how long a single request will wait for the worker. pl24
-# worst case is roughly: re-login (~10s) + catalog + dashboard fallback +
-# one transient retry. 60s is generous headroom; the coloureg side should
-# set its own (shorter) client timeout and treat a timeout as "no paint from
-# pl24" rather than blocking the user.
-REQUEST_TIMEOUT_S = float(os.environ.get("PL24_REQUEST_TIMEOUT_S", "60"))
+# Hard ceiling on how long a single request will wait for the worker. The
+# fallback chain has grown since this default was 60s: worst case is now a
+# proactive re-login (~10s) + up to FOUR catalogue legs (routed -> commercial
+# sibling -> Classic -> legacy), each a 10s wait + one 10s silent-timeout
+# re-submit, + the dashboard — ~100s if every leg times out. That's rare
+# (most legs fast-fail in ~1-3s; the Caddy fallback run was 17s total), but
+# 120s covers the true worst case. On timeout the job is abandoned to finish
+# in the background and the NEXT request queues behind it (pool_size=1), so
+# the coloureg side should keep its own shorter client timeout and treat a
+# timeout as "no paint from pl24" rather than blocking the user.
+REQUEST_TIMEOUT_S = float(os.environ.get("PL24_REQUEST_TIMEOUT_S", "120"))
 
 
 @asynccontextmanager
@@ -297,15 +303,13 @@ async def health():
 async def lookup_paint(
     vin: str = Query(..., min_length=11, max_length=20,
                      description="full VIN"),
-    make: str = Query(..., min_length=1,
+    make: str = Query(..., min_length=1, max_length=40,
                       description="VDG-style make, e.g. 'BMW', 'Volkswagen'"),
-    category: str | None = Query(None,
+    category: str | None = Query(None, max_length=4,
                                  description="EU category M1/N1/N2/N3"),
-    year: str | None = Query(None, description="model year (currently unused)"),
+    year: str | None = Query(None, max_length=8,
+                             description="model year (currently unused)"),
     x_api_key: str | None = Header(None, alias="X-API-Key"),
-    api_key: str | None = Query(None,
-                                description="alternative to the X-API-Key "
-                                            "header for the shared secret"),
 ):
     """Look up a paint code for one VIN. Returns the scraper's result as JSON.
 
@@ -314,13 +318,14 @@ async def lookup_paint(
     'auth_error') and `error` to decide what to do — typically fall through
     to the manual-lookup offer on the coloureg side.
 
-    Requires the shared secret (X-API-Key header or ?api_key=) when
-    PL24_API_KEY is configured on the service.
+    Requires the shared secret (X-API-Key header) when PL24_API_KEY is
+    configured on the service.
     """
     # Auth: reject unless the shared secret matches (when one is configured).
     if API_KEY:
-        supplied = x_api_key or api_key
-        if supplied != API_KEY:
+        # Constant-time comparison — cheap hardening against timing probes
+        # on the public URL. Header only (see the API_KEY note above).
+        if not x_api_key or not hmac.compare_digest(x_api_key, API_KEY):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     if worker is None:

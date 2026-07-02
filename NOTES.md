@@ -159,8 +159,8 @@ confident in the ceiling.
 |---|---|---|
 | `PL24_SESSION_IDLE_S` | `900` | Proactive re-login threshold in seconds (idle since last interaction). `0` disables the proactive check (self-heal still covers staleness). Tune here — no code change/redeploy. |
 | `PL24_POOL_SIZE` | `1` | Warm-session count. **Keep at 1** — concurrent sessions on one credential trigger partslink24's squeeze-out. |
-| `PL24_API_KEY` | — | Shared secret coloureg sends as `X-API-Key` / `?api_key=`. |
-| `PL24_REQUEST_TIMEOUT_S` | `60` | Per-request timeout for the worker's queue. |
+| `PL24_API_KEY` | — | Shared secret coloureg sends as the `X-API-Key` header. Header ONLY — the old `?api_key=` query form was removed because query strings land in access logs. |
+| `PL24_REQUEST_TIMEOUT_S` | `120` | Per-request timeout for the worker's queue. Raised from 60: the fallback chain can now walk four catalogue legs + dashboard (~100s absolute worst case). coloureg keeps its own shorter client timeout. |
 | `PL24_HEADED` | off | Run the worker's browser headed (debugging only; normally headless). |
 | `PARTSLINK24_*` | — | partslink24 credentials. |
 
