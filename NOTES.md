@@ -36,7 +36,12 @@ WF0YXXTTGYFT38981,Ford,N1,2015
   `Mercedes-Benz`, `Volkswagen`, `Citroën`.
 - `category` — optional; defaults to passenger. Set **`N1`** (and `N2`/`N3`)
   for commercial vehicles / vans (Sprinter, Transit, Crafter, etc.) so they
-  route to the right commercial catalogue.
+  route to the right commercial catalogue. A wrong or missing category on a
+  van is no longer fatal: `COMMERCIAL_FALLBACK` cross-links every family
+  with both a passenger and a commercial catalogue (Mercedes, Fiat, Ford,
+  VW, plus Citroën↔DS), so an M1-misclassified van self-heals via
+  `catalog:commercial` at the cost of one extra leg. Correct category is
+  still preferred — it resolves on the first leg.
 - `year` — optional; captured but currently unused (reserved for future
   Classic-catalogue cutoff routing).
 

@@ -221,17 +221,33 @@ COMMERCIAL_REROUTING: dict[str, dict[str, str]] = {
 # N1/N2/N3 boundary is genuinely fuzzy: GVW can't be reliably derived
 # from a VIN, and a 3.5t van vs a 3.5t-plus light truck sit right on the
 # line, so VDG's category occasionally puts a Mercedes on the wrong side.
-# When the routed commercial catalogue fails, try the sibling commercial
-# catalogue before falling through to Classic/dashboard. This only fires
-# for Mercedes commercials and only on failure, so correctly-routed
-# lookups pay nothing.
+# When the routed catalogue fails to IDENTIFY the vehicle, try the
+# sibling catalogue in the same family before falling through to
+# Classic/dashboard. Fires only on "vehicle not found"-type failures
+# (skipped on "paint code not found" — see the chain logic), so
+# correctly-routed lookups pay nothing.
 #
-# VW and Ford don't need this (single commercial catalogue each). MAN
-# and IVECO don't need it either — they're standalone heavy-truck
-# catalogues with no category-dependent routing.
+# Originally commercial<->commercial only (Mercedes Vans/Trucks: the
+# N1/N2/N3 split can't be derived reliably upstream). The Caddy entry
+# below proved the passenger<->commercial direction fails the same way:
+# the M1/N1 category comes from the upstream provider and can simply be
+# wrong. One hop only — the chain does not walk sibling-of-sibling.
+#
+# MAN and IVECO need no entry (standalone heavy-truck catalogues, no
+# category-dependent routing). BMW <-> BMW Motorrad is deliberately NOT
+# cross-linked: cars vs motorcycles isn't a realistic misclassification,
+# and a dead Motorrad attempt would only delay the BMW Classic leg that
+# actually rescues old BMWs. Modern<->Classic pairs are handled by
+# CLASSIC_SIBLING, Opel/Vauxhall legacy by LEGACY_SIBLING.
 COMMERCIAL_FALLBACK: dict[str, str] = {
     "Mercedes-Benz Vans":   "Mercedes-Benz Trucks",
     "Mercedes-Benz Trucks": "Mercedes-Benz Vans",
+    # Base passenger Mercedes -> Vans: an M1-classified Vito/V-Class/
+    # small Sprinter routes to the passenger catalogue and fails
+    # "vehicle not found"; one hop into Vans recovers it. Trucks-as-M1
+    # is left unwired — a misclassified HGV is implausible, and the
+    # single-hop chain couldn't reach it from here anyway.
+    "Mercedes-Benz":        "Mercedes-Benz Vans",
     # Mirror the Mercedes-style cross-fallback for Fiat: passenger vs
     # commercial Fiats live in separate catalogues, and the M1/N1
     # boundary for a Doblò or Panda Van is just as fuzzy as Mercedes's
@@ -239,6 +255,27 @@ COMMERCIAL_FALLBACK: dict[str, str] = {
     # try the sibling before falling through to dashboard.
     "Fiat":                 "Fiat Professional",
     "Fiat Professional":    "Fiat",
+    # Ford: same split as Fiat (fordp_parts / fordt_parts). No observed
+    # failure yet, but UK traffic is Transit-heavy and an M1-classified
+    # Transit whose paint VDG lacks would fail exactly like the Caddy
+    # below. Structural add with the same guard/cost profile.
+    "Ford":                 "Ford Commercial",
+    "Ford Commercial":      "Ford",
+    # Volkswagen: proven live by a 2026 Caddy Maxi (WV2ZZZSK7TX044364,
+    # reg RK26LTJ). VDG classified it M1 -> routed to the passenger
+    # catalogue ("VIN could not be assigned") -> the chain skipped
+    # straight past the commercial catalogue that resolves it in ~2s
+    # (M7P), because no VW entry existed here. With this entry the
+    # misrouted lookup self-heals as via=catalog:commercial.
+    "Volkswagen":                     "Volkswagen Commercial Vehicles",
+    "Volkswagen Commercial Vehicles": "Volkswagen",
+    # Citroën <-> DS: not an M1/N1 split, but the same failure shape —
+    # one family, two catalogues (citroen_parts / citroenDs_parts), and
+    # the upstream make string can't reliably tell us which side a
+    # DS 3 / DS 7 lives on. Reuses the same single-retry slot; via
+    # reads catalog:commercial for these (cosmetic only).
+    "Citroën":              "Citroën DS",
+    "Citroën DS":           "Citroën",
 }
 
 # Per Matt at LexCom (partslink24 UK support, May 2026): there is no

@@ -201,10 +201,15 @@ message is still in the frame HTML, which `BRAND_UNAVAILABLE_RE` matches
 
 ---
 
-## Multi-leg fallback chains (Mercedes, Fiat, Ford, Classic-sibling brands, Opel/Vauxhall legacy)
+## Multi-leg fallback chains (Mercedes, Fiat, Ford, VW, Citroën, Classic-sibling brands, Opel/Vauxhall legacy)
 
-Commercial vehicles (MB Vans↔Trucks, Fiat↔Fiat Professional, Ford↔Ford
-Pro), Classic-sibling brands (BMW, MINI, Mercedes, Porsche, VW, BMW
+Every family with both a passenger and a commercial catalogue is
+cross-linked in `COMMERCIAL_FALLBACK` (MB base→Vans plus Vans↔Trucks,
+Fiat↔Fiat Professional, Ford↔Ford Commercial, VW↔VW Commercial Vehicles,
+and Citroën↔DS — the last a brand split, not M1/N1, but the same failure
+shape). Note: earlier revisions of this doc listed Ford as wired when the
+map didn't actually contain it — fixed alongside the VW Caddy case below.
+Classic-sibling brands (BMW, MINI, Mercedes, Porsche, VW, BMW
 Motorrad), and Opel/Vauxhall (live PSA catalogue ↔ legacy catalogue) may try
 multiple catalogues before the dashboard. The error string concatenates every
 leg separated by `; `, and the **`Via`** column now records which leg won:
@@ -238,6 +243,19 @@ Metallic`. (Up to ~four legs; mostly transient timeouts — see below.)
 
 Fiat M1 → passenger Fiat → Fiat Professional (commercial sibling) →
 dashboard. Catches mis-categorised Doblòs etc. on the M1/N1 boundary.
+
+### VW category misclassification → commercial sibling (the Caddy case)
+
+The upstream provider's M1/N1 category can simply be wrong. Confirmed:
+a 2026 Caddy Maxi (`WV2ZZZSK7TX044364`, reg RK26LTJ) came through as
+**M1** → routed to passenger VW → "VIN could not be assigned" → and the
+chain walked Classic → dashboard → fail, because no VW entry existed in
+`COMMERCIAL_FALLBACK`. The commercial catalogue resolves the same VIN in
+~2s (`M7P`, proven with `--category N1`). With VW now cross-linked, the
+misrouted lookup self-heals as `via=catalog:commercial`. Cost of the
+wider map: a genuinely-unfindable vehicle in these families pays one
+extra ~2–10s leg before Classic/dashboard; the "paint code not found"
+skip rule still applies, so positively-identified vehicles never pay it.
 
 ### Skip rules (so legs aren't wasted)
 
@@ -419,8 +437,9 @@ human-readable `Error`. Values:
 ### The `Via` column
 
 Records which leg resolved a success: `catalog` (primary),
-`catalog:commercial` (MB Vans↔Trucks, Fiat↔Pro, Ford↔Pro),
-`catalog:classic` (Classic sibling), or `dashboard`. Useful for spotting
+`catalog:commercial` (MB base→Vans + Vans↔Trucks, Fiat↔Pro,
+Ford↔Commercial, VW↔Commercial, Citroën↔DS),
+`catalog:classic` (Classic sibling), `catalog:legacy`, or `dashboard`. Useful for spotting
 Classic-resolved cars and the transient-timeout pattern (dashboard
 recoveries) in the data.
 
