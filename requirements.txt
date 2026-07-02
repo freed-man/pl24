@@ -1,4 +1,13 @@
-playwright>=1.60
+# Playwright is EXACT-PINNED and must move in LOCKSTEP with the Dockerfile
+# base image (mcr.microsoft.com/playwright/python:vX.Y.Z-noble). The image
+# bakes the browser binaries in and we never run `playwright install`, so a
+# pip playwright newer than the image's browsers crashes the worker at
+# startup. Proven 2026-07-02: >=1.60 resolved to the freshly-released 1.61.0
+# against the v1.60.0-noble image -> BrowserType.launch "Executable doesn't
+# exist" -> all healthchecks failed. Upgrading = bump BOTH files together,
+# then re-run the test VINs (picker Mercedes WDB2010242F790734, Suzuki SPA,
+# legacy Vauxhall W0L0AHL3565157973, Caddy WV2ZZZSK7TX044364, an Audi).
+playwright==1.60.0
 python-dotenv>=1.0
 fastapi>=0.110
 uvicorn[standard]>=0.29

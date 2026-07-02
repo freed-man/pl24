@@ -5,8 +5,13 @@
 # proved this image's base + the scraper work headless on a Railway datacenter
 # IP; this image turns it into the always-running service coloureg calls.
 #
-# Base image MUST match the Playwright version in requirements.txt
-# (playwright>=1.60) or Playwright won't find its bundled browser.
+# Base image version moves in LOCKSTEP with the EXACT playwright pin in
+# requirements.txt (playwright==1.60.0). Browser binaries are baked in here
+# and we never run `playwright install`, so any driver/image version skew
+# crashes the worker at startup. Proven 2026-07-02: an unpinned >=1.60
+# resolved to the freshly-released 1.61.0 against this v1.60.0 image ->
+# BrowserType.launch "Executable doesn't exist" -> healthcheck failure.
+# Upgrading = change BOTH files together + re-run the test VINs first.
 # -noble = Ubuntu 24.04.
 FROM mcr.microsoft.com/playwright/python:v1.60.0-noble
 
