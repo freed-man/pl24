@@ -167,7 +167,74 @@ confident in the ceiling.
 `service.py` itself needs no per-VIN changes when editing `Session`; the HTTP
 plumbing and queue are independent of the session-health logic.
 
+## Upgrading Playwright (lockstep runbook)
 
+_Deliberately self-contained: when an upgrade is due, paste this whole
+section into a fresh chat and work through it top to bottom._
+
+**Why this exists.** The Docker base image bakes the browser binaries in and
+the service never runs `playwright install`, so the pip `playwright` version
+and the image tag MUST match exactly. Proven 2026-07-02: an unpinned `>=1.60`
+resolved to the freshly released 1.61.0 against the `v1.60.0-noble` image;
+the worker crashed at startup (`BrowserType.launch: Executable doesn't
+exist`) and the deploy failed healthcheck. Both files have been exact-pinned
+in lockstep since. Upgrades are deliberate, both-files-together events.
+
+**When to upgrade** — whichever comes first:
+
+- partslink24 starts challenging or squeezing sessions more than usual (an
+  ageing browser fingerprint scores worse over time), or
+- a security advisory lands against the pinned version, or
+- Microsoft deprecates the pinned base-image tag, or
+- roughly a year has passed since the last bump.
+
+Jump straight to the current version — do not step through intermediates
+(bisect only if the jump fails). The cost of an upgrade grows with the gap,
+which is why "annually, on a quiet day" beats "eventually, during an
+incident".
+
+**Procedure** (test runs are live lookups — one VIN at a time, spaced out,
+per the operating constraint):
+
+1. Pick the target `X.Y.Z`. Skim the Playwright Python release notes for
+   sync-API changes (rare — the sync API has been stable for years). Confirm
+   `mcr.microsoft.com/playwright/python:vX.Y.Z-noble` exists — the `-noble`
+   suffix will change with a future Ubuntu LTS, so check the available tags.
+2. Local venv first: `pip install playwright==X.Y.Z` then
+   `playwright install chromium`. The second step is where driver/browser
+   skew bites — never skip it.
+3. Run the live test battery with `--dump`, spaced out. Each VIN exercises a
+   mechanism that a new browser engine's timing/rendering could disturb:
+   - `WDB2010242F790734` (Mercedes 190E) → `441 / catalog` — the "Please
+     select" model-picker auto-handler
+   - `TSMNZC72S00618058` (Suzuki Swift) → `C05` — SPA catalogue timing and
+     the silent-timeout retry path
+   - `W0L0AHL3565157973` (2006 Vauxhall Astra) → `4CU / catalog:legacy` —
+     the legacy-sibling fallback
+   - `WV2ZZZSK7TX044364` (VW Caddy), NO `--category` → `M7P /
+     catalog:commercial` — the full commercial-fallback chain; then WITH
+     `--category N1` → `M7P / catalog` (direct route)
+   - `TRUZZZ8J6B1011103` (Audi TT) → `X5Q` — VW-group compound
+     "Exterior color / Paint Code" extraction
+   - `WVWZZZAUZFW002714` (passenger VW) → `A7N / catalog` — plain first-leg
+     regression
+   Any regression → roll local back (`pip install playwright==<old>` +
+   `playwright install chromium`), stop, and investigate with the dumps
+   before going further.
+4. All green → edit BOTH files in the same commit, and update the version
+   numbers inside their lockstep comments too:
+   - `requirements.txt`: `playwright==X.Y.Z`
+   - `Dockerfile`: `FROM mcr.microsoft.com/playwright/python:vX.Y.Z-noble`
+5. Commit `.`, push. Watch the Railway build log for
+   `Collecting playwright==X.Y.Z` and a green healthcheck.
+6. Verify deployed: Railway console `pip show playwright` → `X.Y.Z`, then
+   one real lookup through the worker.
+7. Rollback if production misbehaves: revert the commit. The exact pin makes
+   the previous state byte-identical — that is what it is for.
+8. Update the handoff doc's Packages paragraph with the new version.
+
+The base-image bump also brings a newer Python and OS packages along for
+free; nothing in pl24 depends on a specific Python minor version.
 
 Selectors are best-effort because partslink24's routes differ by
 manufacturer subscription. If a step fails:
