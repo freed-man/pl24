@@ -1036,9 +1036,22 @@ def submit_vin(page: Page, vin: str, *, source: str) -> tuple[bool, str | None]:
 
 PAINT_CODE_PATTERNS = [
     # VW/Audi: "Exterior color / Paint Code\n8E / A7W" — code after the slash.
+    # The (?>...) atomic groups are load-bearing, not style. With plain
+    # \s* / [A-Z0-9]+ this pattern backtracks QUADRATICALLY when the label
+    # is present but the value is not: "Exterior color / Paint Code"
+    # followed by a long whitespace run and a long alphanumeric run with no
+    # "/" measured 1.4s on a 12k-char input (and ~900ms at 10k). Real pages
+    # are ~8k and cost ~2ms for the whole extraction stack, so this was
+    # never hit in practice — but a malformed or error page carrying the
+    # label could add over a second to a single lookup for nothing.
+    # Atomic groups forbid backtracking into the whitespace/alnum runs,
+    # which drops the same input to 0.18ms while matching exactly the same
+    # strings (verified against real VW pages plus colon, blank-line and
+    # spaces-only variants, and the Interior-color negative case).
+    # Requires Python 3.11+; the container is 3.12 (playwright noble image).
     re.compile(
-        r"Exterior\s*colou?r\s*/\s*Paint\s*Code\s*[:\n]?\s*"
-        r"[A-Z0-9]+\s*/\s*([A-Z0-9]{2,8})",
+        r"Exterior\s*colou?r\s*/\s*Paint\s*Code(?>\s*)[:\n]?(?>\s*)"
+        r"(?>[A-Z0-9]+)\s*/\s*([A-Z0-9]{2,8})",
         re.I,
     ),
     # Nissan: "Exterior color\tZ11" — code follows the label directly,
