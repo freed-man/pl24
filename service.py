@@ -138,6 +138,10 @@ def _load_accounts() -> list[Pl24Credentials | None]:
 
 ACCOUNTS = _load_accounts()
 POOL_SIZE = len(ACCOUNTS)
+# Ceiling on total pool startup (all slots). Generous: a cold container
+# launching Chromium and completing a partslink24 login can legitimately
+# take tens of seconds per slot.
+POOL_START_TIMEOUT_S = float(os.environ.get("PL24_POOL_START_TIMEOUT_S", "180"))
 SKIP_BRAND_CHECK = os.environ.get("PL24_SKIP_BRAND_CHECK", "") == "1"
 HEADED = os.environ.get("PL24_HEADED", "") == "1"
 
@@ -202,8 +206,23 @@ class PoolWorker:
                                  name=f"pl24-pool-{idx}", daemon=True)
             t.start()
             self._threads.append(t)
-        for _ in self._threads:
-            self._ready.acquire()
+        # Bounded wait. A slot signals _ready exactly once — on success or
+        # on failure — so an un-signalled slot means it is STUCK rather than
+        # broken: sync_playwright().start() or the browser launch can hang
+        # rather than raise (most plausibly under memory pressure, which is
+        # precisely what several Chromium instances on a small container
+        # produce). Without a deadline the app would then block in lifespan
+        # forever, serving nothing and logging nothing, until the platform
+        # healthcheck eventually killed it. Fail loudly instead.
+        deadline = time.monotonic() + POOL_START_TIMEOUT_S
+        for i in range(len(self._threads)):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not self._ready.acquire(timeout=remaining):
+                raise RuntimeError(
+                    f"pool startup timed out after {POOL_START_TIMEOUT_S:.0f}s: "
+                    f"{i}/{len(self._threads)} session(s) reported in. A slot "
+                    f"is stuck launching its browser or logging in."
+                )
         if self._start_errors:
             raise self._start_errors[0]
         log(f"[pool] {len(self._sessions)} session(s) ready")
@@ -251,6 +270,16 @@ class PoolWorker:
             with self._lock:
                 self._start_errors.append(e)
             self._ready.release()
+            # session.start() can fail AFTER the browser is up (a failed
+            # login is the likely case), leaving a live Chromium behind.
+            # pw.stop() would probably reap it as a child of the driver
+            # process, but closing explicitly is free and not conditional
+            # on that. Order matters: close the browser, then Playwright.
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:  # noqa: BLE001
+                    pass
             if pw is not None:
                 try:
                     pw.stop()
