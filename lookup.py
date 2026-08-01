@@ -2447,10 +2447,21 @@ def _clear_stale_debug_dumps() -> None:
     """Delete this-script's .html/.png dumps from a previous run so the
     current run's _debug/ only contains what just happened. Only removes
     files we ourselves would have created, never anything else stashed
-    there. Extracted unchanged from run()."""
+    there.
+
+    squeeze_prompt.* is EXEMPT. That dump captures the session
+    squeeze-out prompt, which appears rarely and only for the moment
+    before it is confirmed — it is the one artefact we cannot reproduce on
+    demand. Clearing it at the start of the next run (which is what
+    happened on 2026-08-01: the prompt fired at 07:30:00 and the next CLI
+    invocation wiped it 11s later) defeats the entire point of capturing
+    it. It is overwritten naturally the next time a prompt occurs."""
+    keep = {"squeeze_prompt.html", "squeeze_prompt.png"}
     if DEBUG_DIR.exists():
         cleared = 0
         for f in DEBUG_DIR.iterdir():
+            if f.name in keep:
+                continue
             if f.is_file() and f.suffix.lower() in (".html", ".png"):
                 try:
                     f.unlink()
