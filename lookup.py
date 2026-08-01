@@ -38,8 +38,8 @@ Usage:
     python lookup.py --dump             # dump HTML for every page (headless)
     python lookup.py --dump --headed    # ...and show the browser window
     python lookup.py --fresh            # ignore saved session, log in fresh
-    python lookup.py --skip-brand-check # skip the partslink24 brand-list
-                                        # verification at startup
+    python lookup.py --skip-brand-check # accepted but a no-op (the brand-list
+                                        # check was removed 2026-08)
     python lookup.py --no-fallback      # disable dashboard SEARCH VIN fallback
     python lookup.py --delay 20-60      # wait 20-60s between VINs (multi-VIN
                                         # runs only; off by default)
@@ -88,11 +88,23 @@ DEBUG_DIR = ROOT / "_debug"
 # it's a whole-run CLI switch, not a per-VIN setting.
 DUMP_ALWAYS = False
 
-LOGIN_URL = "https://www.partslink24.com/partslink24/user/login.do"
+LOGIN_URL = "https://www.partslink24.com/en/index.html"
 HOME_URL = "https://www.partslink24.com/"
 CATALOG_URL_TEMPLATE = (
     "https://www.partslink24.com/partslink24/launchCatalog.do?service={}"
 )
+
+# <pl24-login-ui> field selectors (component data-version 1.0.10).
+# data-test-id and name= are the stable hooks; the element ids are React
+# useId() output and change per instance/render. Always use these SCOPED
+# to a single component instance — see _complete_login_from_current_page.
+LOGIN_FIELD_COMPANY = '[data-test-id="pl24-login-ui-loginForm-input-companyId"]'
+LOGIN_FIELD_USERNAME = '[data-test-id="pl24-login-ui-loginForm-input-username"]'
+LOGIN_FIELD_PASSWORD = '[data-test-id="pl24-login-ui-loginForm-input-password"]'
+LOGIN_BUTTON_SUBMIT = '[data-test-id="pl24-login-ui-loginForm-button-submitForm"]'
+# Session cookie partslink24 itself tests for before redirecting to
+# /portal-ui. Authoritative signal for "are we logged in".
+SESSION_COOKIE = "PL24TOKEN"
 
 # Per-VIN extra attempts (on top of the first one) for transient errors
 # like network timeouts. Logical failures (no catalog for brand, VIN not
@@ -365,13 +377,11 @@ BRAND_CATALOG_SERVICE: dict[str, str] = {
 # (psa_opel_parts / psa_vauxhall_parts, where BRAND_CATALOG_SERVICE points for
 # the base brands), and the old service ids (opel_parts / vauxhall_parts)
 # became "<brand> legacy" catalogues for OLDER vehicles. partslink24 still
-# advertises the legacy catalogues on its home grid under these names, so they
-# stay in BRANDS_KNOWN_UNROUTED to keep verify_brand_list() from flagging them
-# as new/unknown brands. They are NOT added to BRAND_CATALOG_SERVICE on
-# purpose: that map is verified against the home grid's exact service ids, and
-# the legacy catalogues are reached only as a fallback (see LEGACY_SIBLING /
-# LEGACY_CATALOG_SERVICE below), not as a routed base brand — so keeping them
-# out of BRAND_CATALOG_SERVICE avoids a spurious id-mismatch warning.
+# advertises the legacy catalogues on its home grid under these names, but
+# they are NOT added to BRAND_CATALOG_SERVICE on purpose: the legacy
+# catalogues are reached only as a fallback (see LEGACY_SIBLING /
+# LEGACY_CATALOG_SERVICE below), never as a routed base brand. This set
+# records that the omission is deliberate rather than an oversight.
 BRANDS_KNOWN_UNROUTED = {
     "Opel legacy",
     "Vauxhall legacy",
@@ -526,87 +536,20 @@ def read_lookups(path: Path) -> list[LookupRow]:
     return rows
 
 
-# ---------- partslink24 brand-list verification ------------------------------
-
-# The login/home page exposes every available catalog as
-#   <a id="<service>_lc" ... title="<Brand>" href=".../launchCatalog.do?service=<service>">
-# We scrape this once per run to detect drift between our hardcoded
-# BRAND_CATALOG_SERVICE map and what partslink24 actually offers.
-BRAND_LINK_PATTERN = re.compile(
-    r'id="([a-zA-Z0-9_]+)_lc"[^>]*?title="([^"]+)"',
-    re.I,
-)
-
-
-def fetch_partslink24_brand_list(page: Page) -> dict[str, str] | None:
-    """Return {brand_title: service_id} as advertised by partslink24's home
-    page, or None if the page can't be parsed."""
-    try:
-        tab = page.context.new_page()
-        try:
-            tab.goto(HOME_URL, wait_until="domcontentloaded", timeout=20_000)
-            # If we hit the bookmark-warning interstitial, click through.
-            handle_attention_page(tab)
-            html = tab.content()
-        finally:
-            try:
-                tab.close()
-            except Exception:
-                pass
-    except Exception as e:  # noqa: BLE001
-        log(f"brand-list scrape failed ({type(e).__name__}: {e})")
-        return None
-
-    found: dict[str, str] = {}
-    for m in BRAND_LINK_PATTERN.finditer(html):
-        service, title = m.group(1), m.group(2).strip()
-        title = title.replace("&amp;", "&")
-        found[title] = service
-    return found or None
-
-
-def verify_brand_list(page: Page) -> None:
-    """Warn (not fail) if partslink24's brand list differs from ours."""
-    advertised = fetch_partslink24_brand_list(page)
-    if advertised is None:
-        log("brand-list verify: skipped (could not scrape home page)")
-        return
-
-    ours = BRAND_CATALOG_SERVICE
-    missing = {
-        b: s for b, s in advertised.items()
-        if b not in ours and b not in BRANDS_KNOWN_UNROUTED
-    }
-    stale = {b: s for b, s in ours.items() if b not in advertised}
-    mismatched = {
-        b: (ours[b], advertised[b])
-        for b in ours
-        if b in advertised and ours[b] != advertised[b]
-    }
-
-    if not (missing or stale or mismatched):
-        log(f"brand-list verify: OK ({len(advertised)} brands match)")
-        return
-
-    log(f"brand-list verify: drift detected ({len(advertised)} brands "
-        f"on partslink24)")
-    for b, s in sorted(missing.items()):
-        log(f"  + partslink24 has new brand: {b!r} -> service={s!r}")
-    for b, s in sorted(stale.items()):
-        log(f"  - we list {b!r} ({s!r}) but partslink24 doesn't")
-    for b, (ours_s, theirs_s) in sorted(mismatched.items()):
-        log(f"  ! {b!r} service id changed: ours={ours_s!r} "
-            f"theirs={theirs_s!r}")
-
-
 # ---------- popup / dialog handlers ------------------------------------------
 
 def handle_cookie_consent(page: Page) -> bool:
     """Click through Usercentrics cookie banner if present."""
+    # Essential-only first: it satisfies the banner without pulling in
+    # Meta Pixel, Google Ads and Matomo (which is configured with session
+    # recording). Fewer third-party scripts per session establishment
+    # means faster, less flaky page loads. "Accept All" stays as fallback
+    # for locales/layouts where the essential-only button is absent.
     candidates = [
+        'button:has-text("Accept only essential services")',
+        'button:has-text("Accept only essential")',
         'button:has-text("Accept All")',
         'button:has-text("Accept all")',
-        'button:has-text("Accept only essential services")',
         'button[data-testid="uc-accept-all-button"]',
         '#uc-btn-accept-banner',
     ]
@@ -622,18 +565,94 @@ def handle_cookie_consent(page: Page) -> bool:
     return False
 
 
+class SqueezeOutUnhandledError(RuntimeError):
+    """Raised when a session squeeze-out prompt appears but we cannot
+    confirm it. See handle_session_squeeze_out for why this is loud."""
+
+
 def handle_session_squeeze_out(page: Page) -> bool:
-    """If a previous session is still open, click Confirm to end it."""
-    prompt = page.locator('#sessionSqueezeOutPrompt').first
-    if not prompt.count() or not prompt.is_visible():
+    """Confirm the 'a previous session is still open' prompt, if shown.
+
+    The 2026-07 rebuild moved this into the <pl24-login-ui> React
+    component. The old ids (#sessionSqueezeOutPrompt, #squeezeout-login-btn)
+    no longer exist. The component bundle ships CSS for the new markup
+    (._squeeze-out__actions_*), but the prompt has never been observed
+    rendering, so the confirm button's data-test-id is UNKNOWN.
+
+    Rather than guess a selector that may silently mis-click, we detect
+    the state by its stable CSS-module class prefix and, if we cannot find
+    an obvious confirm control, dump the page and raise. A loud failure on
+    a rare session collision is much safer than a silent wrong click
+    inside a login form, and the dump gives us the markup needed to
+    finish this properly.
+
+    Returns True if a prompt was found and confirmed, False if none was
+    present."""
+    prompt = page.locator('[class*="_squeeze-out"]').first
+    try:
+        if not prompt.count() or not prompt.is_visible():
+            return False
+    except Exception:
         return False
-    log("session squeeze-out -> Confirm")
-    page.locator('#squeezeout-login-btn').first.click()
-    page.wait_for_timeout(1_000)
-    return True
+
+    log("session squeeze-out prompt detected")
+    # Capture the markup FIRST, before touching anything. This is the only
+    # moment the prompt exists: any click navigates away, and by the time
+    # a later failure dump runs we are back on the logged-out landing page.
+    _dump_squeeze_prompt(page)
+
+    # High-confidence controls only. An earlier revision matched any
+    # data-test-id containing "squeeze" and "button", which on a
+    # Confirm/Cancel pair picks whichever is first in DOM order — that
+    # clicked the wrong control and got the session force-logged-out.
+    # If we cannot identify the confirm button with confidence we raise:
+    # a loud failure on a rare collision is far safer than a blind click
+    # inside a live login form.
+    for sel in ('[data-test-id*="squeeze" i][data-test-id*="confirm" i]',
+                '[data-test-id*="squeezeOut" i][data-test-id*="submit" i]',
+                'button:text-is("Confirm")',
+                'button:text-is("Log in")',
+                'button:text-is("Continue")'):
+        btn = page.locator(sel).first
+        try:
+            if btn.count() and btn.is_visible():
+                log(f"session squeeze-out -> confirming via {sel}")
+                btn.click()
+                page.wait_for_timeout(1_000)
+                return True
+        except Exception:
+            continue
+
+    raise SqueezeOutUnhandledError(
+        "session squeeze-out prompt appeared but no confirm control was "
+        f"recognised; markup saved to {DEBUG_DIR.name}/squeeze_prompt.* "
+        "— send it over so the selector can be pinned down"
+    )
+
+
+def _dump_squeeze_prompt(page: Page) -> None:
+    """Snapshot the squeeze-out prompt the instant it is seen.
+
+    Separate from _dump_login_failure so the two never overwrite each
+    other: the failure dump runs after the page has moved on, whereas
+    this one has to fire while the prompt is still on screen."""
+    try:
+        DEBUG_DIR.mkdir(exist_ok=True)
+        page.screenshot(path=str(DEBUG_DIR / "squeeze_prompt.png"),
+                        full_page=True)
+        (DEBUG_DIR / "squeeze_prompt.html").write_text(
+            page.content(), encoding="utf-8"
+        )
+        log(f"saved squeeze_prompt.* under {DEBUG_DIR.name}/")
+    except Exception:
+        pass
 
 
 def _wait_for_squeeze_or_form(page: Page, timeout_ms: int = 15_000) -> str:
+    # OBSOLETE as of the 2026-07 rebuild: keys on #inputPassword and
+    # #sessionSqueezeOutPrompt, neither of which exists any more. Kept for
+    # reference only; nothing calls it. The login flow now waits on the
+    # <pl24-login-ui> component directly.
     """Wait until either the squeeze-out prompt or the login form's password
     field becomes visible. Returns 'squeeze', 'form', or 'timeout'.
 
@@ -668,6 +687,10 @@ class AttentionPageLoopError(RuntimeError):
 
 
 def handle_attention_page(page: Page) -> bool:
+    # OBSOLETE as of the 2026-07 rebuild: this interstitial only ever
+    # guarded direct navigation to login.do, which now 404s. Nothing calls
+    # it any more; retained because it is cheap and harmless should
+    # partslink24 ever reinstate the interstitial.
     """Detect and dismiss the partslink24 'Attention - Please read carefully'
     bookmark-warning page, which intercepts direct navigation to login.do.
 
@@ -725,13 +748,28 @@ def handle_attention_page(page: Page) -> bool:
 # ---------- login ------------------------------------------------------------
 
 def is_logged_in(page: Page) -> bool:
-    """Return True if the page is the logged-in dashboard."""
-    if page.locator('input[type="password"]:visible').count():
-        return False
-    if page.locator('a:has-text("Log out"), a:has-text("Logout")').count():
-        return True
-    if page.locator('input[placeholder*="SEARCH VIN" i]').count():
-        return True
+    """Return True if we hold a live partslink24 session.
+
+    Keyed on the PL24TOKEN cookie rather than page text. As of the
+    2026-07 rebuild the DOM is no longer a reliable signal:
+
+      - /portal-ui (the new dashboard) has NO "Log out" link at all, just
+        an account-menu icon button, so the old text check returned False
+        while fully logged in.
+      - The old "SEARCH VIN" placeholder is gone; the new box reads
+        "Chassis number".
+      - The landing page redirects logged-in users to /portal-ui via an
+        inline script that itself tests for PL24TOKEN, so the cookie is
+        exactly what partslink24 considers authoritative.
+
+    Old-style Struts catalog pages still carry a "Log out" link and remain
+    covered, since they are served under the same cookie."""
+    try:
+        for c in page.context.cookies():
+            if c.get("name") == "PL24TOKEN" and c.get("value"):
+                return True
+    except Exception:
+        pass
     return False
 
 
@@ -740,9 +778,9 @@ def login(page: Page, save_state: bool = True) -> None:
 
     Used for the cold-start case (no saved session at all). When we
     already have a saved session and only need to re-login after expiry,
-    run() instead lands on the login page via the HOME_URL redirect and
-    calls _complete_login_from_current_page() directly — avoiding a second
-    navigation to the same login.do page.
+    run() instead lands on the landing page via HOME_URL and calls
+    _complete_login_from_current_page() directly — the landing page hosts
+    the login component inline, so no second navigation is needed.
 
     `save_state` is forwarded to the login tail: True (default, the CLI's
     behaviour) writes storage_state.json after a successful login; the
@@ -755,7 +793,11 @@ def login(page: Page, save_state: bool = True) -> None:
     on every call."""
     log("logging in")
     page.goto(LOGIN_URL, wait_until="domcontentloaded")
-    handle_attention_page(page)  # bookmark-warning interstitial
+    # No attention/bookmark interstitial any more: it only ever guarded
+    # direct navigation to login.do, which 404s since the 2026-07 rebuild.
+    # The consent banner DOES still appear, and Usercentrics scroll-locks
+    # the body while it is up, so it must be cleared before the form is
+    # actionable.
     handle_cookie_consent(page)
     _complete_login_from_current_page(page, save_state=save_state)
 
@@ -769,9 +811,9 @@ def _complete_login_from_current_page(page: Page,
     Assumes the caller has already navigated to a partslink24 page that
     resolves to the login form (either login() after going to LOGIN_URL,
     or run() after the HOME_URL redirect on an expired session) and has
-    handled the attention/cookie interstitials. This is the shared tail of
-    the login flow, factored out so the expired-session path doesn't have
-    to navigate to login.do a second time.
+    cleared the cookie-consent banner. This is the shared tail of the
+    login flow, factored out so the expired-session path doesn't have to
+    navigate a second time.
 
     `save_state` controls the storage_state.json write at the end: True
     (default) for the CLI; False for the in-memory service session."""
@@ -779,29 +821,39 @@ def _complete_login_from_current_page(page: Page,
     user = os.environ["PARTSLINK24_USERNAME"]
     pw = os.environ["PARTSLINK24_PASSWORD"]
 
-    # partslink24 runs an async session check on page load. The result is
-    # either: (a) the squeeze-out prompt — a previous session is still
-    # active and we must Confirm to end it before the login form appears;
-    # or (b) the login form itself, ready to fill. Wait for whichever the
-    # server decides on.
-    state = _wait_for_squeeze_or_form(page, timeout_ms=15_000)
-    if state == "squeeze":
-        log("session squeeze-out -> Confirm (pre-form)")
-        page.locator('#squeezeout-login-btn').first.click()
-        # After Confirm, the form should appear; wait for it.
-        state = _wait_for_squeeze_or_form(page, timeout_ms=15_000)
-    if state != "form":
+    # The login form is a React/MUI web component (<pl24-login-ui>,
+    # bundle /pl24-login-ui/v1/index.iife.js) rendered into the LIGHT dom,
+    # so ordinary selectors reach it — no shadow piercing needed.
+    #
+    # IMPORTANT: the landing page mounts the component TWICE — once inside
+    # the header dropdown (#login-wrapper-dialog, hidden) and once inline
+    # in the page body (.pl24-components__login). Their data-test-ids are
+    # identical, so an unscoped locator resolves to 2 elements and
+    # Playwright raises a strict-mode violation. We scope to the in-page
+    # instance, which is the visible one at our 1400px viewport.
+    #
+    # Do NOT key on the element ids (_r_1_, _r_3_, _r_5_): those are React
+    # useId() output and differ between the two instances on the very same
+    # page, so they will not survive a re-render or a bundle bump.
+    form = page.locator(".pl24-components__login pl24-login-ui")
+    try:
+        form.locator(LOGIN_FIELD_COMPANY).wait_for(state="visible",
+                                                   timeout=20_000)
+    except PlaywrightTimeoutError:
         _dump_login_failure(page)
         raise RuntimeError(
-            f"login failed: form never became visible "
-            f"(state={state!r}); see {DEBUG_DIR.name}/login_failed.*"
+            f"login failed: login component never rendered; "
+            f"see {DEBUG_DIR.name}/login_failed.*"
         )
 
-    # Fill the login form with instant fill() — atomic and reliable.
-    page.locator('#login-id').first.fill(p_id)
-    page.locator('#login-name').first.fill(user)
-    page.locator('#inputPassword').first.fill(pw)
-    page.locator('#login-btn').first.click()
+    # fill() dispatches the input events React listens for, so controlled
+    # component state stays in sync (a raw value assignment would not).
+    form.locator(LOGIN_FIELD_COMPANY).fill(p_id)
+    form.locator(LOGIN_FIELD_USERNAME).fill(user)
+    form.locator(LOGIN_FIELD_PASSWORD).fill(pw)
+    # Click the real submit button rather than pressing Enter, so any
+    # onClick validation in the component runs.
+    form.locator(LOGIN_BUTTON_SUBMIT).click()
 
     # After clicking Login, partslink24 may throw up a squeeze-out (if a
     # session reappeared between our load and our submit). Give the page a
@@ -810,12 +862,16 @@ def _complete_login_from_current_page(page: Page,
     page.wait_for_timeout(1_500)
     handle_session_squeeze_out(page)
 
-    try:
-        page.locator('input[placeholder*="SEARCH VIN" i]').first.wait_for(
-            state="visible", timeout=20_000
-        )
-    except PlaywrightTimeoutError:
-        pass
+    # Poll for the PL24TOKEN cookie rather than waiting on a DOM needle:
+    # where we land after submit now depends on the brand estate
+    # (/portal-ui, or an old Struts catalog), but the cookie is set in
+    # every case.
+    waited = 0
+    while waited < 20_000:
+        if is_logged_in(page):
+            break
+        page.wait_for_timeout(500)
+        waited += 500
 
     if not is_logged_in(page):
         _dump_login_failure(page)
@@ -838,7 +894,23 @@ def _extract_login_error(page: Page) -> str:
       2. all visible .error spans, concatenated, with the bullet stripped
       3. fall back to the page URL + title so the user has *something*
     """
-    # 1. Dedicated error div.
+    # 0. New <pl24-login-ui> error paragraph (CSS module class
+    # ._login__error_*), and the landing page's forced-logout banner
+    # (#pl24-alert, "For security reasons, you have been automatically
+    # logged out..."). Also surface the server-side login-disabled message
+    # from window.pl24Settings when it is showing.
+    for sel in ('[class*="_login__error"]',
+                '#pl24-alert:not(.hidden) .alert__text'):
+        try:
+            node = page.locator(sel).first
+            if node.count() and node.is_visible():
+                text = node.inner_text().strip()
+                if text:
+                    return text
+        except Exception:
+            pass
+
+    # 1. Dedicated error div (old Struts login page).
     err_div = page.locator('#loginErrorDiv')
     try:
         if err_div.count():
@@ -2500,12 +2572,12 @@ def _establish_session(page: Page, save_state: bool = True) -> None:
         # nothing in storage_state.json tells us whether they're still
         # valid. Navigate to the home page ONCE and look at where we land:
         #   - still logged in  -> the dashboard renders; proceed directly.
-        #   - session expired  -> partslink24 redirects home to login.do
-        #     and shows the login form. Since we're ALREADY on that form,
-        #     we fill it in place (_complete_login_from_current_page) rather
-        #     than calling login(), which would navigate to the same
-        #     login.do page a second time. This single navigation is the
-        #     check: no separate verify trip.
+        #   - session expired  -> we stay on the landing page, which
+        #     hosts the login component inline. Since the form is ALREADY
+        #     in front of us we fill it in place
+        #     (_complete_login_from_current_page) rather than calling
+        #     login(), which would navigate to the same page again. This
+        #     single navigation is the check: no separate verify trip.
         log("loading partslink24 (checking session)")
         try:
             page.goto(HOME_URL, wait_until="domcontentloaded", timeout=20_000)
@@ -2513,11 +2585,15 @@ def _establish_session(page: Page, save_state: bool = True) -> None:
             log("could not load partslink24; logging in fresh")
             login(page, save_state=save_state)
         else:
-            handle_attention_page(page)
             handle_cookie_consent(page)
             if is_logged_in(page):
+                # Landing page redirects a token-holder to /portal-ui via
+                # its own inline script; either way the cookie is the test.
                 log("saved session OK")
             else:
+                # Expired: we are sitting on the landing page, which hosts
+                # the login component inline, so fill it in place rather
+                # than navigating again.
                 log("saved session expired; re-logging in (in place)")
                 _complete_login_from_current_page(page, save_state=save_state)
 
@@ -2548,11 +2624,17 @@ class Session:
     lives in memory for the life of the process."""
 
     def __init__(self, pw: Playwright, *, headed: bool = False,
-                 skip_brand_check: bool = False,
+                 skip_brand_check: bool = False,  # no-op; see note below
                  allow_dashboard_fallback: bool = True,
                  save_state: bool = False):
         self._pw = pw
         self._headed = headed
+        # Retained but unused: the partslink24 brand-list verification was
+        # removed when the 2026-07 rebuild replaced the home grid's
+        # <a id="<service>_lc" title="<Brand>"> anchors with a React
+        # component that exposes titles and logo slugs but NO service ids.
+        # The parameter stays so service.py (which passes
+        # skip_brand_check=SKIP_BRAND_CHECK) keeps working unchanged.
         self._skip_brand_check = skip_brand_check
         self._allow_dashboard_fallback = allow_dashboard_fallback
         self._save_state = save_state
@@ -2592,8 +2674,6 @@ class Session:
             self._pw, headed=self._headed, use_saved_state=self._save_state,
         )
         _establish_session(self._page, save_state=self._save_state)
-        if not self._skip_brand_check:
-            verify_brand_list(self._page)
         # Fresh login => session is alive now; start the idle clock.
         self._mark_interaction()
 
@@ -2615,7 +2695,6 @@ class Session:
         except PlaywrightTimeoutError:
             login(self._page, save_state=self._save_state)
             return
-        handle_attention_page(self._page)
         handle_cookie_consent(self._page)
         if is_logged_in(self._page):
             return
@@ -2712,7 +2791,6 @@ class Session:
         except PlaywrightTimeoutError:
             login(self._page, save_state=self._save_state)
             return
-        handle_attention_page(self._page)
         handle_cookie_consent(self._page)
         if is_logged_in(self._page):
             # Session turned out still valid (the catalog_ui_error was a
@@ -2773,9 +2851,6 @@ def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
         pw, headed=headed, use_saved_state=True,
     )
     _establish_session(page, save_state=True)
-
-    if not skip_brand_check:
-        verify_brand_list(page)
 
     results = []
     lo, hi = inter_vin_delay
@@ -2838,7 +2913,9 @@ def main() -> None:
     ap.add_argument("--fresh", action="store_true",
                     help="ignore saved session and log in fresh")
     ap.add_argument("--skip-brand-check", action="store_true",
-                    help="skip the once-per-run partslink24 brand-list check")
+                    help="no-op, retained for compatibility (the brand-list "
+                         "check was removed when partslink24 dropped the "
+                         "scrapable home-grid anchors)")
     ap.add_argument("--no-fallback", action="store_true",
                     help="disable dashboard SEARCH VIN fallback")
     ap.add_argument("--delay", default="0",
