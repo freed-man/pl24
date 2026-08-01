@@ -47,6 +47,7 @@ Config via env (all optional except credentials, which lookup.py requires):
 """
 
 import hmac
+import json
 import os
 import queue
 import threading
@@ -74,10 +75,69 @@ else:
 
 from playwright.sync_api import sync_playwright
 
-from lookup import Session, LookupRow, log
+from lookup import Session, LookupRow, Pl24Credentials, log
 
 
-POOL_SIZE = int(os.environ.get("PL24_POOL_SIZE", "1"))
+def _load_accounts() -> list[Pl24Credentials | None]:
+    """Credentials for each warm session, one per pool slot.
+
+    PL24_ACCOUNTS, when set, is a JSON list of accounts and is the ONLY
+    thing that should size a multi-session pool:
+
+        [{"company_id": "gb-900691", "username": "admin",  "password": "..."},
+         {"company_id": "gb-900691", "username": "lookup2","password": "..."}]
+
+    company_id may repeat (additional users under one subscription) or
+    differ (wholly separate accounts) — both give independent sessions.
+
+    WHY ONE ACCOUNT PER SESSION IS MANDATORY, not merely tidy: partslink24
+    permits one live session per USER. Logging the same user in twice
+    triggers the session squeeze-out prompt, and confirming it KILLS the
+    older session (observed repeatedly on 2026-08-01). Two pool sessions
+    sharing one account would therefore take turns evicting each other —
+    each eviction surfacing as catalog_ui_error, each triggering layer 3's
+    forced re-login, which evicts the sibling again. The pool would be
+    slower and less reliable than a single session.
+
+    So POOL_SIZE is derived from the account list rather than set
+    independently: the two cannot drift into that state. With no
+    PL24_ACCOUNTS the pool is a single slot on the environment
+    credentials, exactly as before.
+    """
+    raw = os.environ.get("PL24_ACCOUNTS", "").strip()
+    if not raw:
+        return [None]          # single slot, environment credentials
+    try:
+        entries = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"PL24_ACCOUNTS is not valid JSON: {e}") from e
+    if not isinstance(entries, list) or not entries:
+        raise RuntimeError("PL24_ACCOUNTS must be a non-empty JSON list")
+
+    accounts: list[Pl24Credentials | None] = []
+    seen: set[tuple[str, str]] = set()
+    for i, entry in enumerate(entries):
+        try:
+            creds = Pl24Credentials(entry["company_id"], entry["username"],
+                                    entry["password"])
+        except (TypeError, KeyError) as e:
+            raise RuntimeError(
+                f"PL24_ACCOUNTS[{i}] needs company_id, username, password"
+            ) from e
+        key = (creds.company_id, creds.username)
+        if key in seen:
+            # Would guarantee the squeeze-out war described above.
+            raise RuntimeError(
+                f"PL24_ACCOUNTS[{i}] repeats {creds.company_id}/"
+                f"{creds.username}; each pool session needs its own user"
+            )
+        seen.add(key)
+        accounts.append(creds)
+    return accounts
+
+
+ACCOUNTS = _load_accounts()
+POOL_SIZE = len(ACCOUNTS)
 SKIP_BRAND_CHECK = os.environ.get("PL24_SKIP_BRAND_CHECK", "") == "1"
 HEADED = os.environ.get("PL24_HEADED", "") == "1"
 
@@ -122,82 +182,100 @@ class PoolWorker:
     sequential loop (the FIFO lock).
     """
 
-    def __init__(self, pool_size: int):
-        self._pool_size = pool_size
+    def __init__(self, accounts: "list[Pl24Credentials | None]"):
+        self._accounts = accounts
+        self._pool_size = len(accounts)
         self._jobs: "queue.Queue[_Job | None]" = queue.Queue()
         self._sessions: list[Session] = []
-        self._free: "queue.Queue[Session]" = queue.Queue()
-        self._pw = None
-        self._thread = threading.Thread(target=self._run, name="pl24-pool",
-                                        daemon=True)
-        self._started = threading.Event()
-        self._start_error: Exception | None = None
-        # When pool_size > 1, jobs are dispatched to worker sub-threads so
-        # multiple sessions run concurrently. Each sub-thread borrows/returns
-        # a session from self._free.
-        self._dispatch_pool: list[threading.Thread] = []
+        self._threads: list[threading.Thread] = []
+        # Each slot signals readiness (or failure) independently; start()
+        # waits for all of them.
+        self._ready = threading.Semaphore(0)
+        self._start_errors: list[Exception] = []
+        self._lock = threading.Lock()
 
     # ---- lifecycle ----------------------------------------------------
     def start(self) -> None:
-        self._thread.start()
-        # Wait until sessions are up (or startup failed) before serving.
-        self._started.wait()
-        if self._start_error is not None:
-            raise self._start_error
+        for idx, creds in enumerate(self._accounts):
+            t = threading.Thread(target=self._session_thread,
+                                 args=(idx, creds),
+                                 name=f"pl24-pool-{idx}", daemon=True)
+            t.start()
+            self._threads.append(t)
+        for _ in self._threads:
+            self._ready.acquire()
+        if self._start_errors:
+            raise self._start_errors[0]
+        log(f"[pool] {len(self._sessions)} session(s) ready")
 
-    def _run(self) -> None:
-        """Thread entry: build Playwright + sessions, then serve jobs."""
+    def _session_thread(self, idx: int,
+                        creds: "Pl24Credentials | None") -> None:
+        """One pool slot: its OWN Playwright, browser, session and account,
+        serving jobs from the shared queue for the life of the process.
+
+        Playwright's sync API is THREAD-AFFINE. SyncBase._sync() captures
+        greenlet.getcurrent() and drives the work by switching to a
+        dispatcher fiber created when sync_playwright().start() ran;
+        greenlets cannot be switched to across threads. So a browser
+        created on thread A simply cannot be driven from thread B — it
+        raises rather than merely being unsafe.
+
+        An earlier design started one Playwright on a single pool thread
+        and dispatched each job to a fresh sub-thread that borrowed a
+        session from a free-queue. That could never have worked for
+        POOL_SIZE > 1 (every lookup would have hit the greenlet error),
+        and it also spawned one unbounded OS thread per queued request and
+        lost FIFO ordering, since queue.Queue makes no promise about which
+        waiter wins. This design fixes all three: Playwright per thread,
+        a fixed number of threads, and ordering owned by the single jobs
+        queue.
+        """
+        pw = None
+        session = None
         try:
-            self._pw = sync_playwright().start()
-            for i in range(self._pool_size):
-                s = Session(
-                    self._pw,
-                    headed=HEADED,
-                    skip_brand_check=SKIP_BRAND_CHECK,
-                    allow_dashboard_fallback=True,
-                    save_state=False,   # in-memory session; ephemeral container
-                )
-                log(f"[pool] starting session {i + 1}/{self._pool_size}")
-                s.start()
-                self._sessions.append(s)
-                self._free.put(s)
-            log(f"[pool] {len(self._sessions)} session(s) ready")
+            pw = sync_playwright().start()
+            session = Session(
+                pw,
+                headed=HEADED,
+                skip_brand_check=SKIP_BRAND_CHECK,
+                allow_dashboard_fallback=True,
+                save_state=False,   # in-memory session; ephemeral container
+                creds=creds,
+            )
+            who = f"{creds.company_id}/{creds.username}" if creds else "env"
+            log(f"[pool] starting session {idx + 1}/{self._pool_size} ({who})")
+            session.start()
+            with self._lock:
+                self._sessions.append(session)
         except Exception as e:  # noqa: BLE001
-            self._start_error = e
-            self._started.set()
+            with self._lock:
+                self._start_errors.append(e)
+            self._ready.release()
+            if pw is not None:
+                try:
+                    pw.stop()
+                except Exception:  # noqa: BLE001
+                    pass
             return
 
-        self._started.set()
-
-        if self._pool_size == 1:
-            self._serve_sequential()
-        else:
-            self._serve_concurrent()
-
-    def _serve_sequential(self) -> None:
-        """POOL_SIZE == 1: the simple FIFO lock. One job at a time."""
-        session = self._sessions[0]
-        while True:
-            job = self._jobs.get()
-            if job is None:  # shutdown sentinel
-                break
-            session = self._run_one(job, session)
-
-    def _serve_concurrent(self) -> None:
-        """POOL_SIZE > 1: dispatch each job to a sub-thread that borrows a
-        free session, so up to POOL_SIZE lookups run in parallel."""
-        while True:
-            job = self._jobs.get()
-            if job is None:
-                break
-            t = threading.Thread(target=self._dispatch_one, args=(job,),
-                                 daemon=True)
-            t.start()
-
-    def _dispatch_one(self, job: _Job) -> None:
-        session = self._free.get()          # blocks until a session is free
-        session = self._run_one(job, session)
-        self._free.put(session)
+        self._ready.release()
+        try:
+            while True:
+                job = self._jobs.get()
+                if job is None:
+                    # Re-post so sibling slots also see the sentinel.
+                    self._jobs.put(None)
+                    break
+                session = self._run_one(job, session)
+        finally:
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                pw.stop()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _run_one(self, job: _Job, session: Session) -> Session:
         """Run one job on `session`, with one crash-recovery retry. Returns
@@ -233,18 +311,17 @@ class PoolWorker:
         return sum(1 for s in self._sessions if s.is_alive())
 
     def stop(self) -> None:
-        # Signal the serve loop to exit, then close sessions + Playwright.
+        """Post the shutdown sentinel and wait for the slots to wind down.
+
+        Teardown deliberately happens ON each slot's own thread (the finally
+        block in _session_thread), never here: browser and Playwright
+        objects are thread-affine, so closing them from the FastAPI thread
+        would raise a greenlet error instead of closing anything. All this
+        method does is signal and join.
+        """
         self._jobs.put(None)
-        for s in self._sessions:
-            try:
-                s.close()
-            except Exception:  # noqa: BLE001
-                pass
-        try:
-            if self._pw is not None:
-                self._pw.stop()
-        except Exception:  # noqa: BLE001
-            pass
+        for t in self._threads:
+            t.join(timeout=10)
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +350,7 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(
             f"missing required env vars: {', '.join(missing)}"
         )
-    worker = PoolWorker(POOL_SIZE)
+    worker = PoolWorker(ACCOUNTS)
     # start() blocks until sessions are logged in (or raises on failure), so
     # the service only reports healthy once it can actually serve.
     worker.start()

@@ -59,7 +59,9 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
+import weakref
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urljoin
 
 from dotenv import load_dotenv  # used as fallback if env.py is missing
@@ -672,6 +674,59 @@ def is_logged_in(page: Page) -> bool:
     return False
 
 
+class Pl24Credentials(NamedTuple):
+    """One partslink24 login. Company id is per-account, not global: an
+    additional user under the same company shares company_id and differs
+    only in username/password, while a wholly separate account differs in
+    all three. Both shapes work."""
+    company_id: str
+    username: str
+    password: str
+
+
+# Page -> credentials. A WeakKeyDictionary so entries disappear with the
+# page; nothing to clean up on session teardown.
+#
+# WHY A REGISTRY rather than a `creds` parameter threaded through the call
+# chain: re-login is triggered from deep inside the lookup flow —
+# _try_catalog() and _try_dashboard() both call login(page) when they find
+# an expired session, and neither has any notion of which Session it
+# belongs to. With a multi-account pool, threading credentials would mean
+# touching six signatures and getting every one right; miss a single call
+# site and session 2 silently re-authenticates as account 1, squeezing out
+# its own sibling. Binding to the page makes the correct account
+# unavoidable: every login path already has the page in hand.
+_PAGE_CREDENTIALS: "weakref.WeakKeyDictionary[Page, Pl24Credentials]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def bind_credentials(page: Page, creds: Pl24Credentials | None) -> None:
+    """Associate a page with the account it should log in as. Pass None to
+    leave the page on the process-wide environment credentials."""
+    if creds is not None:
+        _PAGE_CREDENTIALS[page] = creds
+
+
+def credentials_for(page: Page) -> Pl24Credentials:
+    """Credentials for this page, falling back to the environment.
+
+    The fallback is what keeps the CLI and the single-account service
+    working unchanged: nothing binds, so everything reads the same env vars
+    it always did."""
+    try:
+        creds = _PAGE_CREDENTIALS.get(page)
+    except TypeError:
+        creds = None
+    if creds is not None:
+        return creds
+    return Pl24Credentials(
+        os.environ["PARTSLINK24_COMPANY_ID"],
+        os.environ["PARTSLINK24_USERNAME"],
+        os.environ["PARTSLINK24_PASSWORD"],
+    )
+
+
 def login(page: Page, save_state: bool = True) -> None:
     """Navigate to the login page and run the full login flow.
 
@@ -716,9 +771,9 @@ def _complete_login_from_current_page(page: Page,
 
     `save_state` controls the storage_state.json write at the end: True
     (default) for the CLI; False for the in-memory service session."""
-    p_id = os.environ["PARTSLINK24_COMPANY_ID"]
-    user = os.environ["PARTSLINK24_USERNAME"]
-    pw = os.environ["PARTSLINK24_PASSWORD"]
+    # Per-page credentials when the caller bound them (multi-account pool),
+    # otherwise the process-wide environment (CLI, single-account service).
+    p_id, user, pw = credentials_for(page)
 
     # The login form is a React/MUI web component (<pl24-login-ui>,
     # bundle /pl24-login-ui/v1/index.iife.js) rendered into the LIGHT dom,
@@ -2651,8 +2706,16 @@ class Session:
     def __init__(self, pw: Playwright, *, headed: bool = False,
                  skip_brand_check: bool = False,  # no-op; see note below
                  allow_dashboard_fallback: bool = True,
-                 save_state: bool = False):
+                 save_state: bool = False,
+                 creds: Pl24Credentials | None = None):
         self._pw = pw
+        # Which partslink24 account this session logs in as. None = the
+        # process-wide environment credentials (CLI and single-account
+        # service). Set per session by a multi-account pool, and bound to
+        # the page in start() so that EVERY login path — including the
+        # re-logins buried in _try_catalog/_try_dashboard — uses this
+        # account rather than the environment's.
+        self._creds = creds
         self._headed = headed
         # Retained but unused: the partslink24 brand-list verification was
         # removed when the 2026-07 rebuild replaced the home grid's
@@ -2698,6 +2761,11 @@ class Session:
         self._browser, self._context, self._page = _launch_browser_and_context(
             self._pw, headed=self._headed, use_saved_state=self._save_state,
         )
+        # Bind BEFORE the first login: _establish_session may log in
+        # immediately, and every later re-login (including the ones inside
+        # _try_catalog / _try_dashboard, which never see this Session) will
+        # resolve the account through the page.
+        bind_credentials(self._page, self._creds)
         _establish_session(self._page, save_state=self._save_state)
         # Fresh login => session is alive now; start the idle clock.
         self._mark_interaction()
