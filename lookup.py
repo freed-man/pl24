@@ -575,17 +575,19 @@ def handle_session_squeeze_out(page: Page) -> bool:
     """Confirm the 'a previous session is still open' prompt, if shown.
 
     The 2026-07 rebuild moved this into the <pl24-login-ui> React
-    component. The old ids (#sessionSqueezeOutPrompt, #squeezeout-login-btn)
-    no longer exist. The component bundle ships CSS for the new markup
-    (._squeeze-out__actions_*), but the prompt has never been observed
-    rendering, so the confirm button's data-test-id is UNKNOWN.
+    component; the old ids (#sessionSqueezeOutPrompt, #squeezeout-login-btn)
+    no longer exist. Markup captured from a live prompt on 2026-08-01:
 
-    Rather than guess a selector that may silently mis-click, we detect
-    the state by its stable CSS-module class prefix and, if we cannot find
-    an obvious confirm control, dump the page and raise. A loud failure on
-    a rare session collision is much safer than a silent wrong click
-    inside a login form, and the dump gives us the markup needed to
-    finish this properly.
+        <div data-test-id="pl24-login-ui-sessionSqueezeOut-squeezeOut">
+          "Would you like to end the current session now and log in again?"
+          <button data-test-id="...-sessionSqueezeOut-button-cancel">Cancel
+          <button data-test-id="...-sessionSqueezeOut-button-confirm">Confirm
+
+    Cancel renders FIRST. That ordering is a trap: a selector matching
+    merely "squeeze" + "button" resolves to both and .first takes Cancel,
+    which aborts the login and gets the session force-logged-out ("For
+    security reasons, you have been automatically logged out"). Match the
+    confirm button explicitly and nothing else.
 
     Returns True if a prompt was found and confirmed, False if none was
     present."""
@@ -643,105 +645,6 @@ def _dump_squeeze_prompt(page: Page) -> None:
     except Exception:
         pass
 
-
-def _wait_for_squeeze_or_form(page: Page, timeout_ms: int = 15_000) -> str:
-    # OBSOLETE as of the 2026-07 rebuild: keys on #inputPassword and
-    # #sessionSqueezeOutPrompt, neither of which exists any more. Kept for
-    # reference only; nothing calls it. The login flow now waits on the
-    # <pl24-login-ui> component directly.
-    """Wait until either the squeeze-out prompt or the login form's password
-    field becomes visible. Returns 'squeeze', 'form', or 'timeout'.
-
-    partslink24's startup runs an async session check after DOMContentLoaded,
-    so we have to wait for the JS to decide which UI to show — checking
-    once on page-ready isn't enough."""
-    waited = 0
-    interval = 250
-    while waited < timeout_ms:
-        try:
-            squeeze = page.locator('#sessionSqueezeOutPrompt').first
-            if squeeze.count() and squeeze.is_visible():
-                return "squeeze"
-        except Exception:
-            pass
-        try:
-            pw = page.locator('#inputPassword').first
-            if pw.count() and pw.is_visible():
-                return "form"
-        except Exception:
-            pass
-        page.wait_for_timeout(interval)
-        waited += interval
-    return "timeout"
-
-
-class AttentionPageLoopError(RuntimeError):
-    """Raised when the partslink24 attention/bookmark-warning interstitial
-    keeps reappearing after we click Reload. Indicates the bypass has
-    stopped working — possibly because partslink24 changed the page format
-    or our click target. Caller should abort rather than spin forever."""
-
-
-def handle_attention_page(page: Page) -> bool:
-    # OBSOLETE as of the 2026-07 rebuild: this interstitial only ever
-    # guarded direct navigation to login.do, which now 404s. Nothing calls
-    # it any more; retained because it is cheap and harmless should
-    # partslink24 ever reinstate the interstitial.
-    """Detect and dismiss the partslink24 'Attention - Please read carefully'
-    bookmark-warning page, which intercepts direct navigation to login.do.
-
-    The page has no login form, just a heading and a Reload link that
-    redirects to the proper login flow. We detect by heading text and
-    click Reload; if we somehow land back on it, we raise
-    AttentionPageLoopError rather than silently letting the caller spin.
-
-    Returns True if the page was detected and successfully dismissed,
-    False if no attention page was visible. Raises if a loop is detected
-    or if the page format changed (heading present but no Reload link).
-    """
-    # Cheap check first — only do the click work if the heading is present.
-    heading = page.locator('h1, h2').filter(has_text="Attention").first
-    try:
-        if not heading.count() or not heading.is_visible():
-            return False
-    except Exception:
-        return False
-
-    log("attention/bookmark-warning page detected -> clicking Reload")
-    reload_link = page.locator('a').filter(has_text=re.compile(r"^\s*Reload\s*$",
-                                                                 re.I)).first
-    if not reload_link.count():
-        # Heading was there but no Reload link — page format changed.
-        # We have no way to dismiss it; fail loudly so the user can see
-        # what happened instead of looping into a re-login wall.
-        raise AttentionPageLoopError(
-            "attention page detected but no Reload link found "
-            "(partslink24 may have changed the page format)"
-        )
-
-    try:
-        with page.expect_navigation(wait_until="domcontentloaded",
-                                    timeout=15_000):
-            reload_link.click()
-    except PlaywrightTimeoutError:
-        log("attention page: navigation after Reload click timed out")
-
-    # Make sure we didn't loop back to the same warning.
-    looped = page.locator('h1, h2').filter(has_text="Attention").first
-    try:
-        if looped.count() and looped.is_visible():
-            raise AttentionPageLoopError(
-                "attention page still showing after Reload — "
-                "would loop indefinitely if we returned to the caller"
-            )
-    except AttentionPageLoopError:
-        raise
-    except Exception:
-        pass
-    return True
-
-
-# ---------- login ------------------------------------------------------------
 
 def is_logged_in(page: Page) -> bool:
     """Return True if we hold a live partslink24 session.
@@ -2468,6 +2371,13 @@ def dump_debug(page: Page, vin: str) -> None:
     except Exception:
         pass
     for i, fr in enumerate(page.frames):
+        # frames[0] IS the main frame, so its content duplicates the
+        # <vin>.html written above byte for byte. Skip it; keep every child
+        # frame, which are the ones carrying real extra signal (the PSA
+        # paint popup renders its table in an iframe, which is why
+        # collect_all_text walks frames at all).
+        if fr is page.main_frame:
+            continue
         # Skip the usercentrics cookie-consent cross-domain bridge — same
         # boilerplate JS in every dump, useless for diagnosing partslink24
         # issues, just adds clutter to _debug/.
