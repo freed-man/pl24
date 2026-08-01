@@ -374,11 +374,18 @@ REQUEST_TIMEOUT_S = float(os.environ.get("PL24_REQUEST_TIMEOUT_S", "120"))
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global worker
-    missing = [v for v in _REQUIRED_ENV if not os.environ.get(v)]
-    if missing:
-        raise RuntimeError(
-            f"missing required env vars: {', '.join(missing)}"
-        )
+    # The single-account env vars are required ONLY when at least one pool
+    # slot falls back to them (i.e. no PL24_ACCOUNTS). In multi-account mode
+    # every slot carries its own credentials, so demanding them anyway would
+    # reject a correctly-configured deployment that had cleanly removed the
+    # old vars.
+    if any(c is None for c in ACCOUNTS):
+        missing = [v for v in _REQUIRED_ENV if not os.environ.get(v)]
+        if missing:
+            raise RuntimeError(
+                f"missing required env vars: {', '.join(missing)} "
+                f"(needed because no PL24_ACCOUNTS is configured)"
+            )
     worker = PoolWorker(ACCOUNTS)
     # start() blocks until sessions are logged in (or raises on failure), so
     # the service only reports healthy once it can actually serve.
