@@ -2705,12 +2705,19 @@ class Session:
     def _ensure_logged_in(self) -> None:
         """Cheap per-request session validity check + in-place re-login.
 
-        is_logged_in() is a no-navigation DOM check, so this is essentially
-        free when the session is healthy (the common case). When the session
-        has expired, navigate home (which redirects to the login form) and
-        complete login in place — the same recovery run() does for a stale
-        saved session, just triggered lazily per request instead of once at
-        startup."""
+        is_logged_in() is a no-navigation cookie check (one IPC read of the
+        PL24TOKEN cookie — cheaper than the DOM probing it replaced), so this
+        is essentially free when the session is healthy (the common case).
+        When the session has expired, navigate home and complete login in
+        place — the same recovery run() does for a stale saved session, just
+        triggered lazily per request instead of once at startup.
+
+        NOTE this check can still be fooled by a HALF-ALIVE session: the
+        cookie can outlive the server-side session (e.g. after a squeeze-out
+        by another login), exactly as the previous DOM check could be fooled
+        by a stale page that still looked logged in. That failure mode is not
+        new and is not handled here — it is caught by layer 3 in
+        Session.lookup (catalog_ui_error -> force re-login -> retry once)."""
         if is_logged_in(self._page):
             return
         log("session not logged in at request time; re-logging in")
