@@ -588,7 +588,8 @@ def handle_session_squeeze_out(page: Page) -> bool:
 
     Returns True if a prompt was found and confirmed, False if none was
     present."""
-    prompt = page.locator('[class*="_squeeze-out"]').first
+    prompt = page.locator(
+        '[data-test-id="pl24-login-ui-sessionSqueezeOut-squeezeOut"]').first
     try:
         if not prompt.count() or not prompt.is_visible():
             return False
@@ -596,37 +597,31 @@ def handle_session_squeeze_out(page: Page) -> bool:
         return False
 
     log("session squeeze-out prompt detected")
-    # Capture the markup FIRST, before touching anything. This is the only
-    # moment the prompt exists: any click navigates away, and by the time
-    # a later failure dump runs we are back on the logged-out landing page.
+    # Capture the markup before touching anything: the prompt exists only
+    # until a button is clicked.
     _dump_squeeze_prompt(page)
 
-    # High-confidence controls only. An earlier revision matched any
-    # data-test-id containing "squeeze" and "button", which on a
-    # Confirm/Cancel pair picks whichever is first in DOM order — that
-    # clicked the wrong control and got the session force-logged-out.
-    # If we cannot identify the confirm button with confidence we raise:
-    # a loud failure on a rare collision is far safer than a blind click
-    # inside a live login form.
-    for sel in ('[data-test-id*="squeeze" i][data-test-id*="confirm" i]',
-                '[data-test-id*="squeezeOut" i][data-test-id*="submit" i]',
-                'button:text-is("Confirm")',
-                'button:text-is("Log in")',
-                'button:text-is("Continue")'):
-        btn = page.locator(sel).first
-        try:
-            if btn.count() and btn.is_visible():
-                log(f"session squeeze-out -> confirming via {sel}")
-                btn.click()
-                page.wait_for_timeout(1_000)
-                return True
-        except Exception:
-            continue
+    # Exact confirm selector, captured from a live prompt 2026-08-01.
+    # The prompt renders Cancel FIRST and Confirm second, both matching a
+    # naive '*="squeeze"' + '*="button"' selector — which is precisely how
+    # an earlier revision of this function clicked Cancel and got the
+    # session force-logged-out ("For security reasons, you have been
+    # automatically logged out"). Match the confirm button and nothing else.
+    btn = page.locator(
+        '[data-test-id="pl24-login-ui-sessionSqueezeOut-button-confirm"]'
+    ).first
+    try:
+        if btn.count() and btn.is_visible():
+            log("session squeeze-out -> Confirm")
+            btn.click()
+            page.wait_for_timeout(1_000)
+            return True
+    except Exception:
+        pass
 
     raise SqueezeOutUnhandledError(
-        "session squeeze-out prompt appeared but no confirm control was "
-        f"recognised; markup saved to {DEBUG_DIR.name}/squeeze_prompt.* "
-        "— send it over so the selector can be pinned down"
+        "session squeeze-out prompt appeared but the Confirm button was "
+        f"not clickable; see {DEBUG_DIR.name}/squeeze_prompt.*"
     )
 
 
