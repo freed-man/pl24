@@ -60,6 +60,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urljoin
 
 from dotenv import load_dotenv  # used as fallback if env.py is missing
 from playwright.sync_api import (
@@ -1423,6 +1424,79 @@ def collect_all_text(page: Page) -> str:
     return "\n".join(parts)
 
 
+def _handle_catalog_candidates(page: Page) -> bool:
+    """Pick a catalogue when partslink24 offers several for one VIN.
+
+    Distinct from _handle_model_picker: that one handles the React
+    sales-type dropdown ("Please select:" + _item_yt7ex_27 rows, Mercedes).
+    THIS one handles the old-Struts CATALOGUE-candidate table, which has no
+    "please select" text at all and so was invisible to every existing
+    check:
+
+        <table id="nav-vinCatalogCandidates-table">
+          <tr class="tc-row tc-data-row"
+              url="vin-group.action?catalog=THMTPB917&...&vin=...">
+            <td class="catalogName">I10 17</td>
+            <td class="fromDate">Oct 3, 2016</td>
+            <td class="toDate">Aug 20, 2019</td>
+
+    Without this, the VIN resolves fine server-side but the vehicle page is
+    never reached: wait_for_vehicle_data times out, the silent-timeout
+    re-submit hits the same table, the dashboard leg hits it twice more,
+    and the VIN is reported as page_load_timeout — ~47s of dead waiting
+    ending in a false not-found. Observed on NLHA851ALKZ503536 (Hyundai
+    i10) on both 2026-07-14 and 2026-08-01, identically.
+
+    Picking the FIRST candidate is safe: verified 2026-08-01 by opening
+    both candidates for that VIN by hand — THMTPB917 and TEURPB917 returned
+    byte-identical vehicle data (same production date, market, engine and
+    transmission numbers, and the same "Exterior color: TOMOTO RED"). The
+    candidates are market/date-range variants of one catalogue, not
+    different vehicles, so they cannot yield a different paint code. Same
+    reasoning as the Mercedes sales-type picker above.
+
+    Navigates via the row's own `url` attribute rather than clicking, so we
+    don't depend on the Struts click handler being bound yet.
+
+    Returns True if candidates were present and one was opened.
+    """
+    rows = page.locator(
+        "#nav-vinCatalogCandidates-table tbody tr.tc-data-row")
+    try:
+        n = rows.count()
+    except Exception:
+        return False
+    if not n:
+        return False
+
+    href = None
+    try:
+        href = rows.first.get_attribute("url")
+    except Exception:
+        pass
+
+    label = ""
+    try:
+        label = rows.first.inner_text().replace("\n", " ").strip()
+    except Exception:
+        pass
+    log(f"catalogue candidates ({n}) -> opening first: {label or '?'}")
+
+    if href:
+        try:
+            page.goto(urljoin(page.url, href),
+                      wait_until="domcontentloaded", timeout=20_000)
+            return True
+        except Exception:
+            pass
+    # Fallback: click the row and let the page's own handler navigate.
+    try:
+        rows.first.click()
+        return True
+    except Exception:
+        return False
+
+
 def _handle_model_picker(page: Page) -> bool:
     """Some VINs (notably older Mercedes) don't resolve to a single vehicle:
     partslink24 shows a "Please select:" dropdown of sales-type variants
@@ -1485,6 +1559,7 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
     interval = 300
     text = ""
     picker_handled = False
+    candidates_handled = False
     while waited < timeout_ms:
         text = collect_all_text(page)
         lower = text.lower()
@@ -1497,6 +1572,14 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
                 page.wait_for_timeout(interval)
                 waited += interval
                 continue
+        # Catalogue-candidate table (old-Struts brands, e.g. Hyundai/Kia).
+        # Carries no "please select" text, so it needs its own check.
+        # Same one-shot guard: a re-appearing table must not loop.
+        if not candidates_handled and _handle_catalog_candidates(page):
+            candidates_handled = True
+            page.wait_for_timeout(interval)
+            waited += interval
+            continue
         if BRAND_UNAVAILABLE_RE.search(text):
             return text
         if any(p in lower for p in VIN_NOT_FOUND_PHRASES):
