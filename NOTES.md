@@ -166,6 +166,7 @@ confident in the ceiling.
 | `PL24_POOL_START_TIMEOUT_S` | `180` | Ceiling on total pool startup. A slot that hangs launching its browser (rather than failing) would otherwise block startup forever with no diagnostic. |
 | `PL24_API_KEY` | — | Shared secret coloureg sends as the `X-API-Key` header. Header ONLY — the old `?api_key=` query form was removed because query strings land in access logs. |
 | `PL24_REQUEST_TIMEOUT_S` | `120` | Per-request timeout for the worker's queue. Raised from 60: the fallback chain can now walk four catalogue legs + dashboard (~100s absolute worst case). coloureg keeps its own shorter client timeout. |
+| `PL24_SKIP_BRAND_CHECK` | off | **No-op**, read but ignored (the brand-list verification was removed 2026-08-01). Retained only so an existing Railway variable doesn't need clearing. |
 | `PL24_HEADED` | off | Run the worker's browser headed (debugging only; normally headless). |
 | `PARTSLINK24_*` | — | partslink24 credentials. |
 
