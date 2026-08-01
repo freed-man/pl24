@@ -84,8 +84,8 @@ def _load_accounts() -> list[Pl24Credentials | None]:
     PL24_ACCOUNTS, when set, is a JSON list of accounts and is the ONLY
     thing that should size a multi-session pool:
 
-        [{"company_id": "gb-900691", "username": "admin",  "password": "..."},
-         {"company_id": "gb-900691", "username": "lookup2","password": "..."}]
+        [{"company_id": "xx-000000", "username": "user1", "password": "..."},
+         {"company_id": "xx-000000", "username": "user2", "password": "..."}]
 
     company_id may repeat (additional users under one subscription) or
     differ (wholly separate accounts) — both give independent sessions.
