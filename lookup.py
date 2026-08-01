@@ -1475,20 +1475,28 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
                 page.wait_for_timeout(interval)
                 waited += interval
                 continue
-        # Catalogue-candidate table (old-Struts brands, e.g. Hyundai/Kia).
-        # Carries no "please select" text, so it needs its own check.
-        # Same one-shot guard: a re-appearing table must not loop.
-        if not candidates_handled and _handle_catalog_candidates(page):
-            candidates_handled = True
-            page.wait_for_timeout(interval)
-            waited += interval
-            continue
         if BRAND_UNAVAILABLE_RE.search(text):
             return text
         if any(p in lower for p in VIN_NOT_FOUND_PHRASES):
             return text
         if VEHICLE_DATA_NEEDLE.search(text):
             return text
+        # Catalogue-candidate table (old-Struts brands, e.g. Hyundai/Kia).
+        # Carries no "please select" text, so unlike the model picker above
+        # it cannot be gated behind a cheap substring test — it needs a real
+        # locator call, which is a browser round trip. Hence its position
+        # HERE, after the three in-Python needle checks: a page showing the
+        # candidates table matches none of them (no vehicle data, no
+        # not-found text, no brand-unavailable notice), so we still catch it
+        # on the same iteration, but successful and cleanly-not-found
+        # lookups never pay for the round trip at all.
+        # Same one-shot guard as the picker: a re-appearing table must not
+        # loop.
+        if not candidates_handled and _handle_catalog_candidates(page):
+            candidates_handled = True
+            page.wait_for_timeout(interval)
+            waited += interval
+            continue
         page.wait_for_timeout(interval)
         waited += interval
     # Timed out waiting for paint info. If the page nonetheless looks
