@@ -73,7 +73,7 @@ python lookup.py --vin WV1ZZZ... --make Volkswagen --category N1
 | `--fresh` | Ignore the saved session and log in clean (was: deleting `storage_state.json` by hand) |
 | `--debug` | Dump HTML/screenshot to `_debug/<vin>.{html,png}` **on failure** (`_debug/` is wiped at the start of each run). Headless by default — add `--headed` to watch. |
 | `--dump` | Dump on **every** result incl. successes — for inspecting a page that returns a wrong/blank value. Headless by default — add `--headed` to watch. (Renamed from `--dump-always`; no longer forces a window.) |
-| `--skip-brand-check` | Skip the partslink24 brand-list verification at startup |
+| `--skip-brand-check` | **No-op**, accepted only for compatibility. The brand-list verification was removed on 2026-08-01: the 2026-07 partslink24 rebuild replaced the home grid's `<a id="<service>_lc">` anchors with a React component exposing titles and logo slugs but no service ids, so there is nothing left to scrape. `service.py` still passes the flag, hence the parameter remains. |
 | `--no-fallback` | Disable the dashboard SEARCH VIN fallback |
 | `--delay N` / `--delay LO-HI` | Seconds to wait between VINs (multi-VIN runs only; the first VIN never waits). A single number is a fixed delay; `LO-HI` (e.g. `20-60`) is a randomised range. **Default `0` (off)** — typical one-at-a-time usage doesn't need it; use it to space out a multi-VIN batch or the queue worker. |
 
@@ -108,9 +108,13 @@ Besides the CLI, `lookup.py`'s `Session` class is driven by `service.py`, a
 small FastAPI worker deployed on Railway that coloureg calls over the private
 network (`GET /lookup-paint?vin=…&make=…&category=…`, gated by an API key;
 `/health` is unauthenticated). The worker holds **one** logged-in partslink24
-session warm for its lifetime and serialises requests through it
-(`pool_size=1` — never run two concurrent sessions on the same credential, it
-triggers partslink24's squeeze-out / looks like abuse). All of the
+session warm for its lifetime and serialises requests through it. The pool is
+one thread per slot, each owning its **own** Playwright, browser, session and
+account — Playwright's sync API is thread-affine, so a browser created on one
+thread cannot be driven from another. More than one slot therefore requires
+one partslink24 login PER SLOT (see `PL24_ACCOUNTS`); never run two concurrent
+sessions on the same credential, it triggers partslink24's squeeze-out —
+confirmed 2026-08-01, where confirming the prompt killed the older session. All of the
 session-management logic below lives in `Session` so it applies to any caller;
 the CLI doesn't exercise it because each `python lookup.py` run does one
 lookup against a fresh session and exits.
@@ -158,7 +162,8 @@ confident in the ceiling.
 | Var | Default | Meaning |
 |---|---|---|
 | `PL24_SESSION_IDLE_S` | `900` | Proactive re-login threshold in seconds (idle since last interaction). `0` disables the proactive check (self-heal still covers staleness). Tune here — no code change/redeploy. |
-| `PL24_POOL_SIZE` | `1` | Warm-session count. **Keep at 1** — concurrent sessions on one credential trigger partslink24's squeeze-out. |
+| `PL24_ACCOUNTS` | unset | JSON list of partslink24 logins, one per warm session — `[{"company_id":"…","username":"…","password":"…"}, …]`. **The pool size is derived from this list**, so it cannot be set independently. Unset = one session on the `PARTSLINK24_*` env credentials (the normal case). Each entry MUST be a distinct user: partslink24 allows one live session per user, so two slots sharing a login would squeeze each other out in a loop. Duplicates are rejected at startup. |
+| `PL24_POOL_START_TIMEOUT_S` | `180` | Ceiling on total pool startup. A slot that hangs launching its browser (rather than failing) would otherwise block startup forever with no diagnostic. |
 | `PL24_API_KEY` | — | Shared secret coloureg sends as the `X-API-Key` header. Header ONLY — the old `?api_key=` query form was removed because query strings land in access logs. |
 | `PL24_REQUEST_TIMEOUT_S` | `120` | Per-request timeout for the worker's queue. Raised from 60: the fallback chain can now walk four catalogue legs + dashboard (~100s absolute worst case). coloureg keeps its own shorter client timeout. |
 | `PL24_HEADED` | off | Run the worker's browser headed (debugging only; normally headless). |

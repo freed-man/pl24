@@ -100,7 +100,8 @@ Toyota, Suzuki** — gives a bare `Exterior color\t<CODE>`. Also
 | `VIN box never became editable` | Input stayed disabled within 10s | Often brand VIN-ID disabled (now usually surfaces as `brand_unavailable`); dashboard fallback runs anyway |
 | `VIN box not visible` | Catalog UI didn't render the input | Run `--debug`, check the screenshot |
 | `timeout: <details>` | Playwright browser-level timeout | Usually transient — retry happens automatically |
-| `attention page detected but no Reload link...` | partslink24's bookmark interstitial changed | Script aborts; needs a code update |
+| `login failed: login component never rendered` | partslink24's React login component (`<pl24-login-ui>`) did not mount, or its `data-test-id`s changed | See `_debug/login_failed.*`; needs a selector update in `_complete_login_from_current_page` |
+| `session squeeze-out prompt appeared but the Confirm button was not clickable` | The squeeze-out prompt's markup changed | See `_debug/squeeze_prompt.*` (exempt from the stale-dump wipe, so it survives) |
 
 ---
 
@@ -230,7 +231,8 @@ fall back to the legacy catalogue before the dashboard. Confirmed working:
 not found" (the PSA catalogue positively identified the car, so legacy can't
 add a code partslink24 doesn't have). Routing lives in `LEGACY_SIBLING` /
 `LEGACY_CATALOG_SERVICE`; the legacy names stay in `BRANDS_KNOWN_UNROUTED` so
-the brand-list verify doesn't flag them.
+the brand-list verify used to skip them (that verification was removed on
+2026-08-01 — see NOTES.md).
 
 ### `vehicle data did not load (timeout); Mercedes-Benz Trucks: ... ; Mercedes-Benz Classic: ... ; dashboard fallback: ...`
 

@@ -40,8 +40,11 @@ DESIGN (speed-first):
     worker rebuilds that session (Session.start()) and retries the job once.
 
 Config via env (all optional except credentials, which lookup.py requires):
-    PL24_POOL_SIZE        number of warm sessions (default 1)
-    PL24_SKIP_BRAND_CHECK "1" to skip the startup brand-list verify per session
+    PL24_ACCOUNTS         JSON list of partslink24 logins, one per warm
+                          session; POOL SIZE IS DERIVED FROM ITS LENGTH.
+                          Unset = one session on the PARTSLINK24_* env creds.
+    PL24_POOL_START_TIMEOUT_S  ceiling on total pool startup (default 180)
+    PL24_SKIP_BRAND_CHECK no-op; the brand-list verify was removed 2026-08-01
     PL24_HEADED           "1" to run headed (local debugging only; never in
                           the container)
 """
