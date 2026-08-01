@@ -641,7 +641,7 @@ def _dump_squeeze_prompt(page: Page) -> None:
         page.screenshot(path=str(DEBUG_DIR / "squeeze_prompt.png"),
                         full_page=True)
         (DEBUG_DIR / "squeeze_prompt.html").write_text(
-            page.content(), encoding="utf-8"
+            _redact_page_html(page.content()), encoding="utf-8"
         )
         log(f"saved squeeze_prompt.* under {DEBUG_DIR.name}/")
     except Exception:
@@ -766,7 +766,7 @@ def is_logged_in(page: Page) -> bool:
     covered, since they are served under the same cookie."""
     try:
         for c in page.context.cookies():
-            if c.get("name") == "PL24TOKEN" and c.get("value"):
+            if c.get("name") == SESSION_COOKIE and c.get("value"):
                 return True
     except Exception:
         pass
@@ -839,12 +839,12 @@ def _complete_login_from_current_page(page: Page,
     try:
         form.locator(LOGIN_FIELD_COMPANY).wait_for(state="visible",
                                                    timeout=20_000)
-    except PlaywrightTimeoutError:
+    except PlaywrightTimeoutError as e:
         _dump_login_failure(page)
         raise RuntimeError(
             f"login failed: login component never rendered; "
             f"see {DEBUG_DIR.name}/login_failed.*"
-        )
+        ) from e
 
     # fill() dispatches the input events React listens for, so controlled
     # component state stays in sync (a raw value assignment would not).
@@ -947,12 +947,28 @@ def _extract_login_error(page: Page) -> str:
     return f"(no error text on page; url={url} title={title!r})"
 
 
+# The /portal-ui SPA passes a short-lived (10 min) authorization JWT into
+# its web components as a plain DOM attribute:
+#     <pl24-vinsearch-ui token="eyJ...">
+# Its payload carries the session id, user id, account id and licence id.
+# page.content() serialises that verbatim, so any dump taken on a
+# logged-in portal page would write a live credential to disk (and into
+# the Railway container, where _debug/ persists between requests).
+# Strip it at the point of capture.
+_TOKEN_ATTR_RE = re.compile(r'(\stoken=")[^"]{40,}(")', re.I)
+
+
+def _redact_page_html(html: str) -> str:
+    """Remove component bearer tokens from captured HTML."""
+    return _TOKEN_ATTR_RE.sub(r"\1<redacted>\2", html)
+
+
 def _dump_login_failure(page: Page) -> None:
     try:
         DEBUG_DIR.mkdir(exist_ok=True)
         page.screenshot(path=str(DEBUG_DIR / "login_failed.png"), full_page=True)
         (DEBUG_DIR / "login_failed.html").write_text(
-            page.content(), encoding="utf-8"
+            _redact_page_html(page.content()), encoding="utf-8"
         )
         log(f"saved login_failed.* under {DEBUG_DIR.name}/")
     except Exception:
@@ -2368,7 +2384,9 @@ def dump_debug(page: Page, vin: str) -> None:
     except Exception:
         pass
     try:
-        base.with_suffix(".html").write_text(page.content(), encoding="utf-8")
+        base.with_suffix(".html").write_text(
+            _redact_page_html(page.content()), encoding="utf-8"
+        )
     except Exception:
         pass
     for i, fr in enumerate(page.frames):
@@ -2379,7 +2397,7 @@ def dump_debug(page: Page, vin: str) -> None:
             continue
         try:
             (DEBUG_DIR / f"{vin}_frame_{i}.html").write_text(
-                fr.content(), encoding="utf-8"
+                _redact_page_html(fr.content()), encoding="utf-8"
             )
         except Exception:
             pass
