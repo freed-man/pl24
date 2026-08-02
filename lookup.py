@@ -1583,7 +1583,23 @@ def _handle_model_picker(page: Page) -> bool:
 
 
 def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
-    waited = 0
+    # WALL-CLOCK deadline, not a sleep counter. The loop body's
+    # collect_all_text is not free: it does one inner_text round trip per
+    # frame with a 2s per-frame ceiling, so a degraded/stuck frame makes an
+    # iteration cost seconds, not milliseconds. The previous form
+    # (`waited += interval` per iteration) counted only the 300ms sleeps and
+    # therefore ran a FIXED ~34 iterations regardless — one consistently
+    # slow frame turned this "10s" wait into ~78s of wall time, and that
+    # multiplies across every catalogue leg, each leg's silent-timeout
+    # re-submit, and the dashboard leg: minutes of a pinned pool slot for
+    # one job, a certain client 504 at REQUEST_TIMEOUT_S, and every queued
+    # job behind it abandoned. Same hang-not-fail shape POOL_START_TIMEOUT_S
+    # exists to bound at startup; this bounds it in the hot path. Fewer
+    # polls happen under pathological slowness, which risks nothing: data
+    # either appears inside the wall budget or it doesn't, and the
+    # silent-timeout re-submit in _process_result_page remains the second
+    # chance either way.
+    deadline = time.monotonic() + timeout_ms / 1000.0
     # Tight polling (300ms) so we detect the data within ~300ms of when
     # the page is actually ready. The check inside the loop is cheap
     # (one frame-text pull + a couple of regex matches); the wall-clock
@@ -1592,7 +1608,7 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
     text = ""
     picker_handled = False
     candidates_handled = False
-    while waited < timeout_ms:
+    while time.monotonic() < deadline:
         text = collect_all_text(page)
         lower = text.lower()
         # Model-disambiguation picker: if present, click a variant once and
@@ -1602,7 +1618,6 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
             if _handle_model_picker(page):
                 picker_handled = True
                 page.wait_for_timeout(interval)
-                waited += interval
                 continue
         if BRAND_UNAVAILABLE_RE.search(text):
             return text
@@ -1624,10 +1639,8 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
         if not candidates_handled and _handle_catalog_candidates(page):
             candidates_handled = True
             page.wait_for_timeout(interval)
-            waited += interval
             continue
         page.wait_for_timeout(interval)
-        waited += interval
     # Timed out waiting for paint info. If the page nonetheless looks
     # like a fully-loaded vehicle-data page (some PSA vehicles have no
     # BODY COLOUR row at all), return what we have so we surface the

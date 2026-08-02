@@ -436,6 +436,14 @@ async def lifespan(app: FastAPI):
     # because it only runs once we've reached the yield. Tear them down here
     # instead. Process exit would reap the Chromiums anyway, but doing it
     # explicitly keeps the failure path honest and bounded.
+    if not API_KEY:
+        # Deliberate design (open = local dev convenience), but on Railway
+        # an unset key means the PUBLIC URL will spend real partslink24
+        # account effort for anyone who finds it. Say so where it will be
+        # seen — the deploy log — rather than relying on someone re-reading
+        # the config comment.
+        log("[service] WARNING: PL24_API_KEY is not set; /lookup-paint is "
+            "UNAUTHENTICATED. Fine locally, wrong on Railway.")
     try:
         worker.start()
     except Exception:
@@ -468,8 +476,9 @@ async def health():
 
 @app.get("/lookup-paint")
 async def lookup_paint(
-    vin: str = Query(..., min_length=11, max_length=20,
-                     description="full VIN"),
+    vin: str = Query(..., min_length=1, max_length=25,
+                     description="full VIN (17 chars; embedded spaces "
+                                 "tolerated and stripped)"),
     make: str = Query(..., min_length=1, max_length=40,
                       description="VDG-style make, e.g. 'BMW', 'Volkswagen'"),
     category: str | None = Query(None, max_length=4,
@@ -508,8 +517,12 @@ async def lookup_paint(
     if worker is None:
         return JSONResponse({"error": "service not ready"}, status_code=503)
 
-    # Strict VIN validation, mirroring read_lookups() exactly (17 chars,
-    # ISO 3779 alphabet — no I/O/Q). The CLI has always enforced this; the
+    # Strict VIN validation, mirroring read_lookups() exactly (strip
+    # spaces, then 17 chars of the ISO 3779 alphabet — no I/O/Q). The
+    # Query() bounds above are transport-level only (they stop megabyte
+    # strings at the framework door); THIS regex is the single source of
+    # truth, so a spaced-but-valid VIN cleans and passes rather than
+    # tripping a framework 422. The CLI has always enforced this; the
     # service previously accepted 11-20 chars of anything and let a typo
     # burn a full ~10-47s lookup, typing the garbage into partslink24's own
     # search on the account. Reject it here in ~0ms instead. 400, not a
