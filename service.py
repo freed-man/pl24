@@ -62,6 +62,7 @@ Config via env (all optional except credentials, which lookup.py requires):
 import hmac
 import json
 import os
+import re
 import queue
 import threading
 import time
@@ -179,7 +180,7 @@ _REQUIRED_ENV = ("PARTSLINK24_COMPANY_ID", "PARTSLINK24_USERNAME",
 # its threading.Event for the result.
 # ---------------------------------------------------------------------------
 class _Job:
-    __slots__ = ("row", "debug", "done", "result", "error")
+    __slots__ = ("row", "debug", "done", "result", "error", "abandoned")
 
     def __init__(self, row: LookupRow, debug: bool):
         self.row = row
@@ -187,6 +188,15 @@ class _Job:
         self.done = threading.Event()
         self.result = None      # LookupResult on success
         self.error = None       # Exception/string on hard failure
+        # Set by submit() when the caller's wait times out while the job is
+        # still QUEUED (or in flight). A queued-but-abandoned job is skipped
+        # at dequeue instead of driving a real partslink24 lookup nobody is
+        # waiting for. Plain bool flipped once across threads — the GIL makes
+        # the read/write safe, and the only race (worker dequeues in the same
+        # instant the caller times out) degrades to the old behaviour: the
+        # lookup runs and its result is discarded. In-flight work is NOT
+        # cancelled — Playwright work can't be interrupted cleanly mid-call.
+        self.abandoned = False
 
 
 class PoolWorker:
@@ -325,6 +335,14 @@ class PoolWorker:
     def _run_one(self, job: _Job, session: Session) -> Session:
         """Run one job on `session`, with one crash-recovery retry. Returns
         the (possibly rebuilt) session so the caller can keep using it."""
+        if job.abandoned:
+            # Caller timed out while this job sat in the queue; nobody is
+            # waiting on the result. Skipping it is pure saving: no
+            # partslink24 traffic, and the next (live) job starts sooner.
+            log(f"[pool] skipping abandoned job {job.row.vin} "
+                f"(caller timed out while queued)")
+            job.done.set()
+            return session
         try:
             job.result = session.lookup(job.row, debug=job.debug)
         except Exception as first_err:  # noqa: BLE001
@@ -346,9 +364,15 @@ class PoolWorker:
         self._jobs.put(job)
         finished = job.done.wait(timeout=timeout)
         if not finished:
-            # The worker is still grinding (or stuck). We can't cancel the
+            # The worker is still grinding (or stuck) — or the job hasn't
+            # even STARTED (queued behind a slow lookup at POOL_SIZE=1,
+            # where this wait covers queue time too). We can't cancel
             # in-flight Playwright work cleanly, so we surface a timeout to
-            # the caller; the job will complete and be discarded.
+            # the caller; marking the job abandoned lets the worker skip it
+            # if it was still queued, so a caller who already got their 504
+            # doesn't cost the account a pointless lookup that also delays
+            # everyone queued behind it.
+            job.abandoned = True
             job.error = f"service timeout after {timeout:.0f}s"
         return job
 
@@ -468,13 +492,38 @@ async def lookup_paint(
     if API_KEY:
         # Constant-time comparison — cheap hardening against timing probes
         # on the public URL. Header only (see the API_KEY note above).
-        if not x_api_key or not hmac.compare_digest(x_api_key, API_KEY):
+        # COMPARED AS BYTES, not str: hmac.compare_digest raises TypeError
+        # on non-ASCII str input, so a crafted header like "X-API-Key: é"
+        # would 500 (with a traceback in the Railway log) instead of 401 —
+        # a free error-page probe on the public URL. Encoding both sides
+        # first makes any header content compare cleanly and fail closed.
+        # errors="replace" (not surrogateescape, which itself raises on a
+        # lone non-DC surrogate): replace NEVER raises, and a replaced byte
+        # can only make the comparison fail — which is the right outcome
+        # for a key that wasn't the key.
+        supplied = (x_api_key or "").encode("utf-8", "replace")
+        if not hmac.compare_digest(supplied, API_KEY.encode("utf-8")):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     if worker is None:
         return JSONResponse({"error": "service not ready"}, status_code=503)
 
-    row = LookupRow(vin=vin.strip().upper(), make=make.strip(),
+    # Strict VIN validation, mirroring read_lookups() exactly (17 chars,
+    # ISO 3779 alphabet — no I/O/Q). The CLI has always enforced this; the
+    # service previously accepted 11-20 chars of anything and let a typo
+    # burn a full ~10-47s lookup, typing the garbage into partslink24's own
+    # search on the account. Reject it here in ~0ms instead. 400, not a
+    # LookupResult: this is caller error, not a lookup outcome, and keeping
+    # it out of OUTCOMES keeps that vocabulary meaning what it says.
+    clean_vin = vin.replace(" ", "").strip().upper()
+    if not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", clean_vin):
+        return JSONResponse(
+            {"error": "malformed VIN: must be 17 chars, letters (no I/O/Q) "
+                      "and digits", "vin": clean_vin},
+            status_code=400,
+        )
+
+    row = LookupRow(vin=clean_vin, make=make.strip(),
                     category=category, year=year)
 
     t0 = time.monotonic()

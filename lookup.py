@@ -949,11 +949,25 @@ def _extract_login_error(page: Page) -> str:
 # the Railway container, where _debug/ persists between requests).
 # Strip it at the point of capture.
 _TOKEN_ATTR_RE = re.compile(r'(\stoken=")[^"]{40,}(")', re.I)
+# Belt for the braces above: the attribute pattern only catches the ONE
+# serialisation we've observed (`<pl24-vinsearch-ui token="eyJ...">`), but
+# /portal-ui builds that attribute from state it also holds elsewhere —
+# inline script JSON, other components — and any of those would serialise
+# into page.content() just as readily. Rather than enumerate placements,
+# catch the token by its SHAPE: three dot-separated base64url segments
+# with realistic lengths is a JWT and nothing else on these pages, so
+# redact it wherever it sits. Segment minimums (10/20/20) keep this from
+# ever touching version strings or dotted identifiers, which never carry
+# 20+ base64url chars per segment.
+_JWT_RE = re.compile(
+    r"eyJ[A-Za-z0-9_-]{7,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}"
+)
 
 
 def _redact_page_html(html: str) -> str:
     """Remove component bearer tokens from captured HTML."""
-    return _TOKEN_ATTR_RE.sub(r"\1<redacted>\2", html)
+    html = _TOKEN_ATTR_RE.sub(r"\1<redacted>\2", html)
+    return _JWT_RE.sub("<redacted-jwt>", html)
 
 
 def _dump_login_failure(page: Page) -> None:
@@ -3049,9 +3063,6 @@ def run(pw: Playwright, rows: list[LookupRow], headed: bool, debug: bool,
 
     if fresh and STATE_FILE.exists():
         STATE_FILE.unlink()
-
-    if debug or dump_always:
-        _clear_stale_debug_dumps()
 
     if debug or dump_always:
         _clear_stale_debug_dumps()
