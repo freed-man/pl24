@@ -727,6 +727,45 @@ def credentials_for(page: Page) -> Pl24Credentials:
     )
 
 
+# Page -> save_state preference, for exactly the reason _PAGE_CREDENTIALS
+# exists (see that comment): the deep re-login sites in _try_catalog and
+# _try_dashboard call login(page) with no notion of which Session they
+# belong to, and login()'s save_state default is True — the CLI's
+# behaviour. In the SERVICE that default is wrong, and not merely untidy:
+# the Session is built save_state=False precisely so no session state
+# touches disk in the container, yet one dead-session recovery inside a
+# lookup would write storage_state.json — the live PL24TOKEN — to /app,
+# where it persists between requests. That is the same exposure class as
+# the component-JWT-in-debug-dumps leak fixed on 2026-08-01, minus the
+# 10-minute expiry. It also meant a multi-account pool's slots would
+# clobber one shared file with whichever account re-logged-in last, and a
+# later crash-recovery start() would key _establish_session's reuse branch
+# off that file's mere existence. Binding the preference to the page makes
+# the deep call sites correct without threading a parameter through the
+# lookup flow; unbound pages keep the True default, so the CLI is
+# unchanged.
+_PAGE_SAVE_STATE: "weakref.WeakKeyDictionary[Page, bool]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def bind_save_state(page: Page, save_state: bool) -> None:
+    """Associate a page with whether logins on it should persist
+    storage_state.json. Sessions bind False; the CLI binds nothing and
+    keeps the historical save-on-login behaviour."""
+    _PAGE_SAVE_STATE[page] = save_state
+
+
+def save_state_for(page: Page) -> bool:
+    """save_state preference for this page, defaulting to True (the CLI's
+    long-standing behaviour) when nothing is bound."""
+    try:
+        pref = _PAGE_SAVE_STATE.get(page)
+    except TypeError:
+        pref = None
+    return True if pref is None else pref
+
+
 def login(page: Page, save_state: bool = True) -> None:
     """Navigate to the login page and run the full login flow.
 
@@ -949,6 +988,14 @@ def open_catalog(page: Page, brand: str) -> "Page | None":
     # (password field visible) or its bookmark-warning interstitial
     # (Attention heading). In either case we treat it as expired and let
     # the caller re-login.
+    #
+    # The Attention branch is RETAINED BUT DORMANT: handle_attention_page
+    # was removed 2026-08-01 because the interstitial only ever guarded
+    # direct navigation to login.do, which now 404s. This check is a
+    # different thing — a redirect landing on that page mid-catalogue-open —
+    # and it has not been observed since the rebuild. Kept because it costs
+    # one locator round trip and failing to notice an expiry is expensive;
+    # delete it only once a live run confirms the page is gone for good.
     if catalog.locator('input[type="password"]:visible').count():
         log("session expired (catalog tab redirected to login)")
         try:
@@ -2117,7 +2164,11 @@ def _try_catalog(page: Page, vin: str, brand: str, result: LookupResult,
     (paint_code_found, error_message)."""
     catalog = open_catalog(page, brand)
     if catalog is None:
-        login(page)
+        # save_state_for: in the service this page is bound False, so the
+        # recovery login does NOT write storage_state.json into the
+        # container (see the _PAGE_SAVE_STATE comment). CLI pages are
+        # unbound and keep the historical save-on-login behaviour.
+        login(page, save_state=save_state_for(page))
         catalog = open_catalog(page, brand)
     if catalog is None:
         return False, "could not open catalog after re-login"
@@ -2146,12 +2197,16 @@ def _try_dashboard(page: Page, vin: str, result: LookupResult,
     except PlaywrightTimeoutError:
         return False, "dashboard fallback: home page load timeout"
 
+    # The password-field probe works against the rebuilt landing page: the
+    # header instance of <pl24-login-ui> is hidden, so :visible resolves to
+    # the inline one only. The Attention branch is dormant for the same
+    # reason as the one in open_catalog — retained, not load-bearing.
     if page.locator('input[type="password"]:visible').count():
         log("dashboard fallback: session expired, re-logging in")
-        login(page)
+        login(page, save_state=save_state_for(page))
     elif page.locator('h1, h2').filter(has_text="Attention").first.count():
         log("dashboard fallback: attention page shown, re-logging in")
-        login(page)
+        login(page, save_state=save_state_for(page))
 
     ok, err = submit_vin(page, vin, source="dashboard")
     if not ok:
@@ -2765,8 +2820,10 @@ class Session:
         return time.monotonic() - self._last_interaction
 
     def start(self) -> None:
-        """Launch the browser, log in, and (optionally) verify the brand
-        list once. Idempotent-ish: if called when already started it tears
+        """Launch the browser and log in. (An optional brand-list
+        verification used to run here; it was removed 2026-08-01 with the
+        rest of the home-grid scraping — see the skip_brand_check note in
+        __init__.) Idempotent-ish: if called when already started it tears
         the old browser down first so a crashed session can be rebuilt by
         simply calling start() again."""
         if self._browser is not None:
@@ -2777,8 +2834,11 @@ class Session:
         # Bind BEFORE the first login: _establish_session may log in
         # immediately, and every later re-login (including the ones inside
         # _try_catalog / _try_dashboard, which never see this Session) will
-        # resolve the account through the page.
+        # resolve the account through the page. save_state is bound for the
+        # same reason: those deep re-logins must inherit this Session's
+        # no-disk preference, not login()'s CLI default.
         bind_credentials(self._page, self._creds)
+        bind_save_state(self._page, self._save_state)
         _establish_session(self._page, save_state=self._save_state)
         # Fresh login => session is alive now; start the idle clock.
         self._mark_interaction()
@@ -2798,7 +2858,10 @@ class Session:
         by another login), exactly as the previous DOM check could be fooled
         by a stale page that still looked logged in. That failure mode is not
         new and is not handled here — it is caught by layer 3 in
-        Session.lookup (catalog_ui_error -> force re-login -> retry once)."""
+        Session.lookup (catalog_ui_error -> force re-login -> retry once),
+        WITH ONE CAVEAT: _force_relogin still consults is_logged_in itself,
+        so if the cookie survives a dead session then layer 3 short-circuits
+        too. See the open question in _force_relogin's docstring."""
         if is_logged_in(self._page):
             return
         log("session not logged in at request time; re-logging in")
@@ -2893,11 +2956,39 @@ class Session:
         return result
 
     def _force_relogin(self) -> None:
-        """Unconditionally re-establish the login, bypassing the cheap
-        is_logged_in() check (which a half-alive session can pass while still
-        being too stale to work). Navigate home — which redirects to the
-        login form when the session is dead — and complete login in place;
-        fall back to a full login() if the navigation itself fails."""
+        """Re-establish the login after layer 3 decided the session is
+        probably stale. Navigate home — which shows the login form when the
+        session is dead — and complete login in place; fall back to a full
+        login() if the navigation itself fails.
+
+        OPEN QUESTION, deliberately not "fixed" without evidence. The early
+        return below asks is_logged_in(), which since 1c40dc5 (2026-08-01)
+        reads the PL24TOKEN cookie rather than the DOM. This function was
+        written 2026-06-11 against the DOM version, where "navigate, then
+        check" was a genuine server-side test. NOTES.md and _ensure_logged_in
+        both describe layer 3 as BYPASSING the cheap check that fooled layer
+        2 — and consulting the cookie here does not bypass it.
+
+        Whether that matters depends on something untested: does partslink24
+        clear PL24TOKEN when it serves a request carrying a dead token?
+          - If it does, this check is still a real server-side test and
+            nothing is wrong.
+          - If it does not, layer 3 short-circuits in exactly the squeeze-out
+            case it exists for, and the slot stays broken until the idle
+            threshold fires.
+
+        The argument for the first is that partslink24's own landing page
+        redirects to /portal-ui via an inline script keyed on the cookie's
+        PRESENCE, so a server that left a dead token in place would send its
+        own users into a redirect loop. That is reasoning, not a measurement.
+
+        Clearing the cookie here would force a real login unconditionally,
+        but it is NOT a free fix: it discards a session that may be perfectly
+        live, and re-logging in while partslink24 still holds that session
+        raises a squeeze-out against ourselves on every transient
+        catalog_ui_error. That is a certain cost against an unconfirmed
+        benefit, so the log line below exists instead — the next real
+        occurrence in the Railway log settles it either way."""
         try:
             self._page.goto(HOME_URL, wait_until="domcontentloaded",
                             timeout=20_000)
@@ -2906,9 +2997,14 @@ class Session:
             return
         handle_cookie_consent(self._page)
         if is_logged_in(self._page):
-            # Session turned out still valid (the catalog_ui_error was a
-            # transient render glitch, not expiry) — nothing to re-login,
-            # the retry will just run again on the live session.
+            # Either a transient render glitch on a live session (benign, the
+            # retry runs on it), or the untested case above. Logged loudly so
+            # the two can be told apart: if this line is followed by a SECOND
+            # catalog_ui_error for the same VIN, the cookie survived a dead
+            # session and layer 3 needs the cookie-clearing fix.
+            log("force-relogin: PL24TOKEN still present after home nav — "
+                "treating session as live and retrying without re-login "
+                "(if this VIN fails again, the token outlived the session)")
             return
         _complete_login_from_current_page(self._page,
                                           save_state=self._save_state)

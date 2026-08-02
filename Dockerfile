@@ -56,5 +56,9 @@ EXPOSE 8000
 #
 # --ipc=host (on docker run) avoids Chromium running out of /dev/shm on
 # content-heavy pages. On Railway this isn't needed/settable; the noble image
-# + low concurrency (pool size 1) keeps shared-memory pressure low.
+# + low concurrency keeps shared-memory pressure low. NOTE that concurrency
+# is no longer fixed at one: the pool runs one Chromium per entry in
+# PL24_ACCOUNTS, at roughly 150-300MB each, so adding accounts raises both
+# memory and /dev/shm pressure on the container. Size the Railway instance
+# before growing the account list.
 ENTRYPOINT ["sh", "-c", "uvicorn service:app --host 0.0.0.0 --port ${PORT}"]

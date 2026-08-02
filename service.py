@@ -15,29 +15,39 @@ DESIGN (speed-first):
   * WARM sessions. A pool of logged-in browser Sessions is created at startup
     and kept alive, so the ~9s partslink24 login is paid once per session, not
     per request. A request just runs the ~2-5s catalog scrape on an already-
-    logged-in page. Session validity is checked cheaply (is_logged_in, a DOM
-    check, no navigation) per request and re-login happens lazily ONLY when a
-    session has actually expired — no background pinging (which would be both a
-    bot-detection signal and unreliable against absolute server-side timeouts).
+    logged-in page. Session validity is checked cheaply per request
+    (is_logged_in — a PL24TOKEN cookie read, no navigation) and re-login
+    happens lazily ONLY when a session has actually expired — no background
+    pinging (which would be both a bot-detection signal and unreliable
+    against absolute server-side timeouts).
 
-  * SYNC scraper on a worker THREAD. Playwright's sync API can't run inside
-    FastAPI's async event loop, and we don't want to rewrite the 2500-line
-    scraper as async. So one dedicated worker thread owns the Playwright
-    instance and the whole Session pool; async request handlers submit jobs to
-    it via a queue and await the result. With POOL_SIZE=1 the single worker
-    processing its queue IS the one-VIN-at-a-time lock the scraper requires.
+  * ONE THREAD, ONE PLAYWRIGHT, ONE ACCOUNT PER SLOT. Playwright's sync API
+    can't run inside FastAPI's async event loop, and we don't want to rewrite
+    the 3000-line scraper as async — so all browser work happens on worker
+    threads and async handlers submit jobs to a queue and await the result.
+    Crucially, each slot runs its OWN sync_playwright(): the sync API is
+    thread-affine (SyncBase._sync() captures greenlet.getcurrent(), and
+    greenlets are thread-local), so a browser created on one thread cannot be
+    driven from another — it RAISES. An earlier design started a single
+    Playwright on one pool thread and dispatched jobs to sub-threads that
+    borrowed sessions; that could never have worked above one slot. See
+    PoolWorker._session_thread.
 
-  * POOL-READY, size 1 by default. POOL_SIZE controls how many warm sessions
-    run in parallel. 1 = simple FIFO queue (requests serialise; safe, looks
-    like one partslink24 user). Raising it gives true parallelism under
-    concurrent load BUT means N simultaneous logins on one partslink24 account
-    from one datacenter IP — more conspicuous, and partslink24's session
-    squeeze-out behaviour may fight a multi-session pool. So the knob exists
-    but stays at 1 until real traffic + partslink24 tolerance justify raising
-    it. Going 1 -> N is a config change, not a rewrite.
+  * POOL SIZE IS DERIVED, NOT SET. POOL_SIZE == len(ACCOUNTS), because
+    partslink24 permits one live session per USER: two slots sharing a login
+    would take turns squeezing each other out, each eviction surfacing as
+    catalog_ui_error and triggering a forced re-login that evicts the sibling
+    again — slower and less reliable than a single session. So scaling means
+    buying additional partslink24 users and listing them in PL24_ACCOUNTS;
+    there is deliberately no independent size knob, and duplicate users are
+    rejected at startup. Unset PL24_ACCOUNTS = one slot on the PARTSLINK24_*
+    env creds. Note each slot is a real Chromium at roughly 150-300MB.
+
+  * FIFO. All slots serve one shared jobs queue, so ordering is the queue's
+    and does not depend on which waiter a Condition happens to wake.
 
   * CRASH RECOVERY. If a lookup throws because the browser/context died, the
-    worker rebuilds that session (Session.start()) and retries the job once.
+    slot rebuilds its session (Session.start()) and retries the job once.
 
 Config via env (all optional except credentials, which lookup.py requires):
     PL24_ACCOUNTS         JSON list of partslink24 logins, one per warm
@@ -180,13 +190,16 @@ class _Job:
 
 
 class PoolWorker:
-    """Owns the Playwright instance and the Session pool on ONE thread.
+    """Runs the Session pool: one thread per slot, each owning its own
+    Playwright, browser, session and partslink24 account.
 
-    All browser interaction happens here. Jobs arrive on a queue; the worker
-    pulls a free session, runs the lookup, returns it to the free pool, and
-    signals the job. With POOL_SIZE > 1 the worker uses a small thread pool
-    internally so sessions run in parallel; with POOL_SIZE == 1 it's a plain
-    sequential loop (the FIFO lock).
+    All browser interaction happens on those threads and nowhere else — the
+    sync API is thread-affine, so even teardown has to run on the owning
+    thread (see stop()). Every slot loops on the SAME jobs queue, so a job
+    goes to whichever slot frees up first and ordering is FIFO. With a single
+    slot that loop IS the one-VIN-at-a-time lock the scraper requires; with N
+    slots the requirement still holds, because each slot drives its own page
+    sequentially and never touches a sibling's.
     """
 
     def __init__(self, accounts: "list[Pl24Credentials | None]"):
@@ -392,7 +405,21 @@ async def lifespan(app: FastAPI):
     worker = PoolWorker(ACCOUNTS)
     # start() blocks until sessions are logged in (or raises on failure), so
     # the service only reports healthy once it can actually serve.
-    worker.start()
+    #
+    # On PARTIAL failure (one slot's login fails, or the whole thing hits
+    # POOL_START_TIMEOUT_S) the slots that DID come up are already sitting on
+    # the jobs queue with live Chromiums. The finally below can't reach them,
+    # because it only runs once we've reached the yield. Tear them down here
+    # instead. Process exit would reap the Chromiums anyway, but doing it
+    # explicitly keeps the failure path honest and bounded.
+    try:
+        worker.start()
+    except Exception:
+        try:
+            worker.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        raise
     log(f"[service] ready; pool_size={POOL_SIZE}")
     try:
         yield

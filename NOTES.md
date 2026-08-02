@@ -122,9 +122,9 @@ lookup against a fresh session and exits.
 ### Keeping the long-lived session healthy
 
 A warm partslink24 session expires after a while, and the cheap "am I logged
-in?" DOM check can be fooled by a HALF-ALIVE session (the leftover page from
-the previous lookup still looks logged in, but the session is too stale to
-load a fresh catalogue). `Session.lookup()` handles this with three layers,
+in?" check can be fooled by a HALF-ALIVE session (the PL24TOKEN cookie can
+outlive the server-side session, so we proceed, but the session is too stale
+to load a fresh catalogue). `Session.lookup()` handles this with three layers,
 in order, so the common case is fast and every case stays correct:
 
 1. **Proactive idle re-login** (fast path). The session tracks the time since
@@ -134,20 +134,26 @@ in order, so the common case is fast and every case stays correct:
    re-login **before** attempting — turning a ~38s fail-then-heal into a ~10s
    clean re-login. Any successful lookup refreshes the clock, so clustered
    lookups stay warm and never trigger a needless re-login.
-2. **Cheap per-request check** (`_ensure_logged_in`) — a no-navigation DOM
-   check that re-logs-in in place if the session is plainly dead.
+2. **Cheap per-request check** (`_ensure_logged_in`) — a no-navigation read
+   of the `PL24TOKEN` cookie (it was a DOM check until 2026-08-01; the
+   rebuilt `/portal-ui` has no "Log out" link to key on) that re-logs-in in
+   place if the session is plainly dead.
 3. **Self-heal backstop** (the unpredictable case). If a lookup still fails
    with `catalog_ui_error` and no code — the half-alive signature, also
    covering a session killed *within* the idle window by a squeeze-out — we
-   force a real re-login (bypassing the cheap check that was fooled) and retry
-   the lookup once. Look for `catalog_ui_error … forcing re-login and retrying
-   once` in the worker log. Genuine outcomes (`not_found_as_routed`,
-   `name_only`, etc.) are never this signature, so they're never retried.
+   force a re-login and retry the lookup once. Note `_force_relogin` still
+   consults `is_logged_in` after navigating home, so it only bypasses the
+   fooled check if partslink24 clears `PL24TOKEN` for a dead session — see
+   the open question in that function. Look for `catalog_ui_error … forcing
+   re-login and retrying once` in the worker log. Genuine outcomes
+   (`not_found_as_routed`, `name_only`, etc.) are never this signature, so
+   they're never retried.
 
-Because layer 3 guarantees correctness, layer 1's threshold being slightly
-wrong only changes whether a stale lookup is *fast* or *slow*, never whether
-it's *correct*. The idle clock is refreshed only on outcomes that prove the
-session reached partslink24 (`success`, `name_only`, `not_found_as_routed`,
+Layer 3 is what keeps layer 1's threshold from mattering much: get it
+slightly wrong and a stale lookup is merely *slow* rather than *wrong* —
+subject to the `_force_relogin` caveat above, which is unmeasured. The idle
+clock is refreshed only on outcomes that prove the session reached
+partslink24 (`success`, `name_only`, `not_found_as_routed`,
 `unsupported_brand`, `brand_unavailable`, `paint_data_missing`) — a
 failed-because-dead lookup deliberately does **not** reset it.
 
