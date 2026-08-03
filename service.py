@@ -460,7 +460,14 @@ async def lifespan(app: FastAPI):
             worker.stop()
 
 
-app = FastAPI(title="pl24 paint lookup", lifespan=lifespan)
+# docs_url/redoc_url/openapi_url=None: FastAPI would otherwise serve
+# interactive docs and the full OpenAPI schema UNAUTHENTICATED on the public
+# Railway URL — enumerating the endpoint, its parameters and the X-API-Key
+# header name for anyone who finds the service. The key still gates actual
+# lookups either way; this just stops handing strangers the map. The two
+# consumers (coloureg, and Roland with curl) both know the interface.
+app = FastAPI(title="pl24 paint lookup", lifespan=lifespan,
+              docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @app.get("/health")

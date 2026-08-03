@@ -382,9 +382,6 @@ Usually auth (locked/changed password) or outage. **Fix**: `--fresh`.
 ### `dashboard fallback: home page load timeout`
 Couldn't load `partslink24.com`. Network or partslink24 down. Retry later.
 
-### `dashboard fallback: SEARCH VIN box not found`
-Dashboard loaded but no SEARCH VIN box — either not actually logged in or
-layout changed. `--debug`.
 
 ---
 
@@ -397,9 +394,32 @@ Form submitted but ended up not logged in. Common messages:
 - **`Cookies must be enabled`** — browser config; shouldn't happen with our setup.
 - **`(no error text on page; url=... title='...')`** — silent failure; URL/title aid diagnosis.
 
-### `login failed: form never became visible (state='timeout'; ...)`
-Neither squeeze-out prompt nor password form appeared within 15s. Likely
-outage or network. Retry.
+> Historical: `login failed: form never became visible (state='timeout')`
+> and `dashboard fallback: SEARCH VIN box not found` were produced by
+> `_wait_for_squeeze_or_form` / an older dashboard probe, both removed
+> 2026-08-01 with the login rebuild. They can no longer occur; rows in old
+> results.csv files carrying them predate the rebuild.
+
+---
+
+## Service (worker) HTTP rejections — no `results.csv` row
+
+These come from `service.py` before or instead of a lookup, so they appear
+in coloureg's client log and the worker log, never in `results.csv`:
+
+- **`400 malformed VIN`** — the VIN failed strict validation (17 chars,
+  ISO 3779 alphabet, spaces stripped first). Rejected in ~0ms; partslink24
+  is never touched. Fix the caller's input.
+- **`401 unauthorized`** — missing/wrong `X-API-Key` (compared
+  constant-time, as bytes, so hostile header bytes still get a clean 401).
+- **`503 service not ready`** — the pool hasn't finished starting.
+- **`504 service timeout after Ns`** — the request exceeded
+  `PL24_REQUEST_TIMEOUT_S` including queue wait. If the job was still
+  queued it is skipped at dequeue (`skipping abandoned job <VIN>` in the
+  worker log) and partslink24 is never engaged for it; if it was already
+  in flight it finishes in the background and is discarded.
+- **`502 <ExceptionType>: …`** — the lookup threw even after the slot's
+  rebuild-and-retry; the message names the exception.
 
 ---
 

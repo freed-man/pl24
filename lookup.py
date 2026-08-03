@@ -1571,6 +1571,18 @@ def _handle_model_picker(page: Page) -> bool:
     except Exception:
         return False
     if not n:
+        # The title matched but NO selectable option did. The realistic
+        # cause is partslink24 redeploying the component with fresh CSS-
+        # module hashes (the _yt7ex_ suffix in the class names above is a
+        # build hash, not a stable id) — at which point this handler goes
+        # blind and a multi-variant VIN regresses to the old ~2min false
+        # not_found_as_routed. Say so loudly: the Railway log should name
+        # the cause the day it happens, not present a bare timeout.
+        log("model picker: 'Please select' text present but no sales-type "
+            "options matched the known selectors — partslink24 may have "
+            "rotated the component's hashed class names; picker handling "
+            "is blind until the selectors in _handle_model_picker are "
+            "updated from a live dump")
         return False
     log("model picker ('Please select') detected -> picking first sales-type "
         "(all variants share the same paint code)")
@@ -3183,7 +3195,16 @@ def main() -> None:
     if args.vin:
         if not args.make:
             sys.exit("--vin requires --make (we don't guess the make)")
-        rows = [LookupRow(vin=args.vin.upper(), make=args.make,
+        # Same normalisation + validation as read_lookups() and the
+        # service endpoint: strip embedded spaces, uppercase, then require
+        # 17 chars of the ISO 3779 alphabet (no I/O/Q). Until this check,
+        # --vin was the one entry point that skipped validation and would
+        # type a malformed VIN straight into partslink24.
+        vin = args.vin.replace(" ", "").strip().upper()
+        if not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", vin):
+            sys.exit(f"--vin: malformed VIN {args.vin!r} "
+                     f"(need 17 chars, letters excluding I/O/Q, digits)")
+        rows = [LookupRow(vin=vin, make=args.make,
                           category=args.category, year=args.year)]
     else:
         for unused in ("make", "category", "year"):

@@ -107,7 +107,13 @@ by market/parts-catalogue). See the "Model picker" note in `ERRORS.md`.
 Besides the CLI, `lookup.py`'s `Session` class is driven by `service.py`, a
 small FastAPI worker deployed on Railway that coloureg calls over the private
 network (`GET /lookup-paint?vin=…&make=…&category=…`, gated by an API key;
-`/health` is unauthenticated). The worker holds **one** logged-in partslink24
+`/health` is unauthenticated). The endpoint validates the VIN before spending
+any browser time: embedded spaces are stripped, then it must be 17 chars of
+the ISO 3779 alphabet (no I/O/Q) or the request gets an immediate `400` —
+malformed input never reaches partslink24. The interactive docs
+(`/docs`, `/redoc`, `/openapi.json`) are disabled so the public URL doesn't
+enumerate the API surface; the worker also logs a loud startup WARNING if
+`PL24_API_KEY` is unset, since that leaves `/lookup-paint` open. The worker holds **one** logged-in partslink24
 session warm for its lifetime and serialises requests through it. The pool is
 one thread per slot, each owning its **own** Playwright, browser, session and
 account — Playwright's sync API is thread-affine, so a browser created on one
@@ -171,7 +177,7 @@ confident in the ceiling.
 | `PL24_ACCOUNTS` | unset | JSON list of partslink24 logins, one per warm session — `[{"company_id":"…","username":"…","password":"…"}, …]`. **The pool size is derived from this list**, so it cannot be set independently. Unset = one session on the `PARTSLINK24_*` env credentials (the normal case). Each entry MUST be a distinct user: partslink24 allows one live session per user, so two slots sharing a login would squeeze each other out in a loop. Duplicates are rejected at startup. |
 | `PL24_POOL_START_TIMEOUT_S` | `180` | Ceiling on total pool startup. A slot that hangs launching its browser (rather than failing) would otherwise block startup forever with no diagnostic. |
 | `PL24_API_KEY` | — | Shared secret coloureg sends as the `X-API-Key` header. Header ONLY — the old `?api_key=` query form was removed because query strings land in access logs. |
-| `PL24_REQUEST_TIMEOUT_S` | `120` | Per-request timeout for the worker's queue. Raised from 60: the fallback chain can now walk four catalogue legs + dashboard (~100s absolute worst case). coloureg keeps its own shorter client timeout. |
+| `PL24_REQUEST_TIMEOUT_S` | `120` | Per-request timeout for the worker's queue, **queue wait included**. Raised from 60: the fallback chain can now walk four catalogue legs + dashboard (~100s absolute worst case). On timeout the caller gets a `504`; a job that was still **queued** is then skipped entirely at dequeue (never sent to partslink24), while a job already **in flight** completes in the background and is discarded. coloureg keeps its own shorter client timeout. |
 | `PL24_SKIP_BRAND_CHECK` | off | **No-op**, read but ignored (the brand-list verification was removed 2026-08-01). Retained only so an existing Railway variable doesn't need clearing. |
 | `PL24_HEADED` | off | Run the worker's browser headed (debugging only; normally headless). |
 | `PARTSLINK24_*` | — | partslink24 credentials. |
