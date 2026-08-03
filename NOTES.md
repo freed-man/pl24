@@ -155,10 +155,13 @@ in order, so the common case is fast and every case stays correct:
    (`not_found_as_routed`, `name_only`, etc.) are never this signature, so
    they're never retried.
 
-A fourth net sits inside the lookup itself (C1, 2026-08-03): if any leg
-heals the session mid-chain (inline re-login on detected expiry) and the
-lookup still ends without a paint code, the pre-heal legs are treated as
-void and the whole VIN is retried once on the live session — because the
+A fourth net wraps the lookup (C1, 2026-08-03): if any leg heals the
+session mid-chain (inline re-login on detected expiry) and the lookup
+still ends without a paint code, the pre-heal legs are treated as void
+and the whole VIN is retried once on the live session. It lives in
+`lookup_vin_with_retry`, not in `lookup_vin` — the latter has eight
+return statements and a check before any one of them covers only that
+one; the wrapper is the single point every exit passes through — because the
 one leg that carries the VIN may have been the one that ran dead. This is
 the net that catches the SPA-estate half-alive case, where a dead session
 gets the catalogue's shell (no VIN box, no password field) instead of a

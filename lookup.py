@@ -55,6 +55,7 @@ import random
 import re
 import shutil
 import sys
+import threading
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -901,11 +902,22 @@ def _complete_login_from_current_page(page: Page,
 # answers are impossible from it; cheapness beats plumbing a per-slot
 # signal through module-level functions.
 LOGIN_GENERATION = 0
+# `LOGIN_GENERATION += 1` is a read-modify-write, NOT atomic: two slots
+# logging in at the same moment can both read N and both write N+1, losing
+# an increment. A lost increment makes a concurrent lookup fail to notice
+# its heal — a silent degrade to pre-C1 behaviour on the one path C1
+# exists for. Harmless at POOL_SIZE=1 (single slot, no concurrency) but
+# PL24_ACCOUNTS is designed to grow, and this is the kind of latent race
+# that only shows up after the pool is expanded and is then very hard to
+# attribute. Reads stay unlocked: loading a single int is atomic, and the
+# comparison only ever needs to know whether the value CHANGED.
+_LOGIN_GEN_LOCK = threading.Lock()
 
 
 def _bump_login_generation() -> None:
     global LOGIN_GENERATION
-    LOGIN_GENERATION += 1
+    with _LOGIN_GEN_LOCK:
+        LOGIN_GENERATION += 1
 
 
 def _extract_login_error(page: Page) -> str:
@@ -2299,7 +2311,6 @@ def _try_dashboard(page: Page, vin: str, result: LookupResult,
 def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
                allow_dashboard_fallback: bool = True) -> LookupResult:
     """Catalog-first VIN lookup with optional dashboard fallback."""
-    login_gen_at_start = LOGIN_GENERATION
     result = LookupResult(
         timestamp=datetime.now().isoformat(timespec="seconds"),
         vin=row.vin,
@@ -2505,24 +2516,6 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
     if catalog_timed_out and dashboard_could_not_assign:
         result.retryable_transient = True
 
-    # C1 (2026-08-03): a session heal DURING this lookup voids every leg
-    # that ran before it. If any re-login happened mid-chain and we still
-    # have no paint code, the no-code answer is untrustworthy — the leg
-    # that actually carries the VIN may have been the one that ran dead
-    # (exactly what happened live: routed VW leg dead -> "VIN box not
-    # visible", commercial leg healed, chain concluded not_found_as_routed
-    # for an A7N vehicle). Flag for the same bounded whole-VIN retry as
-    # B2; the retry runs on the now-live session, so the first leg gets
-    # its honest shot. Never fires when a code WAS found (a heal followed
-    # by a later-leg success needs no retry), and shares EXTRA_RETRIES, so
-    # it cannot loop.
-    if LOGIN_GENERATION != login_gen_at_start and not result.paint_code:
-        if not result.retryable_transient:
-            log(f"session was re-established mid-lookup for {row.vin} — "
-                f"legs that ran before the heal are void; flagging for one "
-                f"whole-VIN retry on the live session")
-        result.retryable_transient = True
-
     return result
 
 
@@ -2543,6 +2536,8 @@ def lookup_vin_with_retry(page: Page, row: LookupRow, debug: bool,
     respects the one-VIN-at-a-time constraint."""
     for attempt in range(EXTRA_RETRIES + 1):
         was_exception = False
+        # C1 snapshot, taken PER ATTEMPT (see below).
+        login_gen_before = LOGIN_GENERATION
         try:
             r = lookup_vin(page, row, debug=debug,
                            allow_dashboard_fallback=allow_dashboard_fallback)
@@ -2559,18 +2554,53 @@ def lookup_vin_with_retry(page: Page, row: LookupRow, debug: bool,
             )
             was_exception = True
 
+        # C1 (2026-08-03, corrected here 2026-08-03): a session heal DURING
+        # the lookup voids every leg that ran before it — the leg that
+        # actually carries the VIN may have been the one driving a dead
+        # session. Observed live: routed VW leg got the SPA shell and failed
+        # "VIN box not visible", the commercial leg healed inline, and the
+        # chain concluded not_found_as_routed for an A7N vehicle.
+        #
+        # This test lives HERE, not inside lookup_vin, and that placement is
+        # the whole point. lookup_vin has EIGHT return statements; the first
+        # version of C1 sat above the last one and so covered exactly one of
+        # them. Two of the others are reachable with a heal behind them and
+        # no paint code — the `not allow_dashboard_fallback` exit, and the
+        # far more important "skipping dashboard fallback" exit, which the
+        # SERVICE hits whenever a leg reports paint-code-not-found or
+        # brand-unavailable. Both silently escaped the net. The wrapper is
+        # the single choke point every exit funnels through, so checking
+        # here cannot be outflanked by a return path.
+        #
+        # Snapshot is per ATTEMPT, so attempt 2 measures its own heals
+        # rather than inheriting attempt 1's.
+        healed_mid_lookup = (LOGIN_GENERATION != login_gen_before)
+
         # Reasons to retry: a thrown browser-side exception (original
-        # behaviour) OR the B2 transient false-not-found flag. A clean
-        # result with neither is final and returns immediately, as before.
-        should_retry = was_exception or r.retryable_transient
+        # behaviour), the B2 transient false-not-found flag, or a C1 heal.
+        # A clean result with none of them is final and returns immediately,
+        # as before. The `r.paint_code` guard below is what keeps C1 from
+        # firing when a later leg already recovered the code.
+        should_retry = (was_exception or r.retryable_transient
+                        or healed_mid_lookup)
         if r.paint_code or not should_retry:
             r.outcome = categorise(r)
             return r
 
         if attempt < EXTRA_RETRIES:
-            reason = ("transient not-found (catalog timeout + dashboard "
-                      "could-not-assign)" if r.retryable_transient
-                      else "browser exception")
+            # Reason reported accurately per cause. The first version
+            # labelled EVERY retry as B2's "catalog timeout + dashboard
+            # could-not-assign", including C1's — which would have sent
+            # anyone reading the Railway log for a real incident chasing a
+            # transient-timeout theory for a session-death event.
+            if was_exception:
+                reason = "browser exception"
+            elif r.retryable_transient:
+                reason = ("transient not-found (catalog timeout + dashboard "
+                          "could-not-assign)")
+            else:
+                reason = ("session re-established mid-lookup — legs that ran "
+                          "before the heal are void")
             log(f"retrying {row.vin} — {reason} "
                 f"(attempt {attempt + 2}/{EXTRA_RETRIES + 1})")
             page.wait_for_timeout(1_500)

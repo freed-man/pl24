@@ -328,7 +328,8 @@ Two layers of automatic recovery now handle this:
   re-logged-in inline) and no paint code was found, every leg that ran
   BEFORE the heal was driving a dead session and its failure is void — so
   the whole VIN gets one retry on the now-live session, via the same
-  bounded wrapper as B2. Proven necessary live: a squeezed-out session
+  bounded wrapper as B2 — and implemented IN that wrapper, so no exit path
+  from `lookup_vin` can bypass it. Proven necessary live: a squeezed-out session
   made the routed VW leg fail `VIN box not visible` (the SPA serves its
   shell to a dead session — no VIN box, no password field), the
   commercial leg healed, and the chain concluded `not_found_as_routed`
