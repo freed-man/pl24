@@ -410,8 +410,24 @@ LEGACY_CATALOG_SERVICE: dict[str, str] = {
 }
 
 
+# Control characters are stripped from every log line, newlines included.
+# Reason: several messages interpolate caller-supplied values — the clearest
+# being `make=`, which the service accepts as free text (bounded to 40 chars
+# but not character-validated, deliberately, since legitimate makes carry
+# spaces, hyphens and accents: 'Mercedes-Benz', 'Citroen', 'Skoda'). A make
+# containing a percent-encoded newline decodes to a real one and would let a
+# caller inject fabricated timestamped lines into the Railway log — the log
+# these audits, the §5 triage table and any future incident all depend on
+# being trustworthy. Sanitising HERE rather than at each call site means no
+# interpolation added later can reintroduce it, and it costs one translate()
+# on a line we were formatting anyway. Every message in this codebase is a
+# single line by design, so nothing legitimate is lost.
+_LOG_CTRL = {c: None for c in range(32)} | {127: None}
+
+
 def log(msg: str) -> None:
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+    safe = str(msg).translate(_LOG_CTRL)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {safe}", flush=True)
 
 
 def normalise_make(make: str | None) -> str | None:
