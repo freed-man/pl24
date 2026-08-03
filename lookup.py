@@ -509,6 +509,33 @@ class LookupRow:
     year: str | None = None
 
 
+_VIN_RE = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
+
+
+def clean_vin(raw: str) -> str | None:
+    """Normalise + validate a VIN. Returns the canonical 17-char VIN, or
+    None if the input is not a VIN.
+
+    THE ASCII CHECK RUNS BEFORE .upper(), AND THE ORDER IS THE POINT.
+    str.upper() is not length-preserving outside ASCII: the ligature
+    '\ufb00' uppercases to 'FF' and '\u00df' to 'SS', so a 16-character
+    raw string can EXPAND into 17 valid-looking characters and sail
+    through a "must be 17 chars" check that runs after case-folding —
+    found by the fuzz battery 2026-08-03, live in all three entry points.
+    The ISO 3779 alphabet is pure ASCII, so rejecting non-ASCII first
+    kills the whole case-folding class at once, and provably changes
+    nothing for any legitimate VIN: every string the old checks accepted,
+    ligatures aside, was ASCII already.
+
+    This is the ONLY VIN validator; read_lookups, --vin and the service
+    endpoint all call it, so the three can never drift apart again."""
+    s = raw.replace(" ", "").strip()
+    if not s.isascii():
+        return None
+    s = s.upper()
+    return s if _VIN_RE.fullmatch(s) else None
+
+
 def read_lookups(path: Path) -> list[LookupRow]:
     """Parse lookups.txt. Each non-empty, non-comment line is a CSV row:
         vin[,make[,category[,year]]]
@@ -540,12 +567,9 @@ def read_lookups(path: Path) -> list[LookupRow]:
         while len(parts) < 4:
             parts.append("")
         vin_part, make_part, cat_part, year_part = parts[:4]
-        vin = vin_part.replace(" ", "").upper()
-        if len(vin) != 17:
-            log(f"skipping malformed VIN (not 17 chars): {raw!r}")
-            continue
-        if not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", vin):
-            log(f"skipping malformed VIN (invalid chars): {raw!r}")
+        vin = clean_vin(vin_part)
+        if vin is None:
+            log(f"skipping malformed VIN: {raw!r}")
             continue
         rows.append(LookupRow(
             vin=vin,
@@ -3292,13 +3316,11 @@ def main() -> None:
     if args.vin:
         if not args.make:
             sys.exit("--vin requires --make (we don't guess the make)")
-        # Same normalisation + validation as read_lookups() and the
-        # service endpoint: strip embedded spaces, uppercase, then require
-        # 17 chars of the ISO 3779 alphabet (no I/O/Q). Until this check,
-        # --vin was the one entry point that skipped validation and would
-        # type a malformed VIN straight into partslink24.
-        vin = args.vin.replace(" ", "").strip().upper()
-        if not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", vin):
+        # clean_vin is the single validator shared with read_lookups and
+        # the service endpoint — see its docstring for the ASCII-first
+        # ordering and why the three sites must not drift.
+        vin = clean_vin(args.vin)
+        if vin is None:
             sys.exit(f"--vin: malformed VIN {args.vin!r} "
                      f"(need 17 chars, letters excluding I/O/Q, digits)")
         rows = [LookupRow(vin=vin, make=args.make,

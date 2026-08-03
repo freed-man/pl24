@@ -420,7 +420,9 @@ These come from `service.py` before or instead of a lookup, so they appear
 in coloureg's client log and the worker log, never in `results.csv`:
 
 - **`400 malformed VIN`** — the VIN failed strict validation (17 chars,
-  ISO 3779 alphabet, spaces stripped first). Rejected in ~0ms; partslink24
+  ISO 3779 alphabet, ASCII only, spaces stripped first; ASCII is checked
+  before uppercasing because `.upper()` can EXPAND non-ASCII input and
+  manufacture a 17th character). Rejected in ~0ms; partslink24
   is never touched. Fix the caller's input.
 - **`401 unauthorized`** — missing/wrong `X-API-Key` (compared
   constant-time, as bytes, so hostile header bytes still get a clean 401).

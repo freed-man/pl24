@@ -89,7 +89,7 @@ else:
 
 from playwright.sync_api import sync_playwright
 
-from lookup import Session, LookupRow, Pl24Credentials, log
+from lookup import Session, LookupRow, Pl24Credentials, log, clean_vin
 
 
 def _load_accounts() -> list[Pl24Credentials | None]:
@@ -535,15 +535,21 @@ async def lookup_paint(
     # search on the account. Reject it here in ~0ms instead. 400, not a
     # LookupResult: this is caller error, not a lookup outcome, and keeping
     # it out of OUTCOMES keeps that vocabulary meaning what it says.
-    clean_vin = vin.replace(" ", "").strip().upper()
-    if not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", clean_vin):
+    # clean_vin (lookup.py) is the single validator shared with
+    # read_lookups and --vin; ASCII is checked BEFORE case-folding there,
+    # because .upper() can EXPAND non-ASCII input ('\ufb00' -> 'FF') and
+    # manufacture a 17th character after the fact. Echo the RAW input back
+    # in the error, truncated: echoing the cleaned form printed the
+    # artefact of our own normalisation rather than what the caller sent.
+    vin_clean = clean_vin(vin)
+    if vin_clean is None:
         return JSONResponse(
             {"error": "malformed VIN: must be 17 chars, letters (no I/O/Q) "
-                      "and digits", "vin": clean_vin},
+                      "and digits", "vin": vin.strip()[:32]},
             status_code=400,
         )
 
-    row = LookupRow(vin=clean_vin, make=make.strip(),
+    row = LookupRow(vin=vin_clean, make=make.strip(),
                     category=category, year=year)
 
     t0 = time.monotonic()
