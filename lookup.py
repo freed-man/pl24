@@ -871,9 +871,41 @@ def _complete_login_from_current_page(page: Page,
         msg = _extract_login_error(page)
         raise RuntimeError(f"login failed: {msg}")
 
+    _bump_login_generation()
     log("logged in, saved session" if save_state else "logged in")
     if save_state:
         page.context.storage_state(path=str(STATE_FILE))
+
+
+# Monotonic count of successful logins in this process. Every successful
+# login of every kind — cold start, layer 1 proactive, layer 2 in-place,
+# layer 3 forced, and the inline heals inside _try_catalog/_try_dashboard —
+# funnels through _complete_login_from_current_page, so bumping here and
+# nowhere else cannot miss one. lookup_vin snapshots it on entry; a changed
+# value at exit means the session was re-established MID-lookup, i.e. some
+# prefix of the fallback chain ran against a dead session and its failures
+# are void. Proven necessary 2026-08-03 (live): a squeezed-out session made
+# the routed VW leg fail "VIN box not visible" (the /pl24-app SPA serves its
+# shell to a dead session — no VIN box, no password field for the expiry
+# probe to catch), the COMMERCIAL leg then healed inline, and legs 2-4
+# honestly reported a passenger VW absent from catalogues it is genuinely
+# absent from: final answer not_found_as_routed for a VIN that is A7N.
+# Neither existing net fired — layer 3 needs the final outcome to be
+# catalog_ui_error (the chain diluted it) and B2 needs the catalog leg to
+# be a TIMEOUT (it was VIN-box-not-visible).
+#
+# Per-process, not per-slot: two slots interleaving logins can make an
+# unrelated slot's lookup see a changed generation and take one spurious
+# whole-VIN retry on its own live session — bounded by EXTRA_RETRIES,
+# costing ~3s, and only when a heal coincided with a no-code result. Wrong
+# answers are impossible from it; cheapness beats plumbing a per-slot
+# signal through module-level functions.
+LOGIN_GENERATION = 0
+
+
+def _bump_login_generation() -> None:
+    global LOGIN_GENERATION
+    LOGIN_GENERATION += 1
 
 
 def _extract_login_error(page: Page) -> str:
@@ -2267,6 +2299,7 @@ def _try_dashboard(page: Page, vin: str, result: LookupResult,
 def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
                allow_dashboard_fallback: bool = True) -> LookupResult:
     """Catalog-first VIN lookup with optional dashboard fallback."""
+    login_gen_at_start = LOGIN_GENERATION
     result = LookupResult(
         timestamp=datetime.now().isoformat(timespec="seconds"),
         vin=row.vin,
@@ -2470,6 +2503,24 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
         "could not be assigned to a distinct model" in err_lower
     )
     if catalog_timed_out and dashboard_could_not_assign:
+        result.retryable_transient = True
+
+    # C1 (2026-08-03): a session heal DURING this lookup voids every leg
+    # that ran before it. If any re-login happened mid-chain and we still
+    # have no paint code, the no-code answer is untrustworthy — the leg
+    # that actually carries the VIN may have been the one that ran dead
+    # (exactly what happened live: routed VW leg dead -> "VIN box not
+    # visible", commercial leg healed, chain concluded not_found_as_routed
+    # for an A7N vehicle). Flag for the same bounded whole-VIN retry as
+    # B2; the retry runs on the now-live session, so the first leg gets
+    # its honest shot. Never fires when a code WAS found (a heal followed
+    # by a later-leg success needs no retry), and shares EXTRA_RETRIES, so
+    # it cannot loop.
+    if LOGIN_GENERATION != login_gen_at_start and not result.paint_code:
+        if not result.retryable_transient:
+            log(f"session was re-established mid-lookup for {row.vin} — "
+                f"legs that ran before the heal are void; flagging for one "
+                f"whole-VIN retry on the live session")
         result.retryable_transient = True
 
     return result

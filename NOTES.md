@@ -155,6 +155,16 @@ in order, so the common case is fast and every case stays correct:
    (`not_found_as_routed`, `name_only`, etc.) are never this signature, so
    they're never retried.
 
+A fourth net sits inside the lookup itself (C1, 2026-08-03): if any leg
+heals the session mid-chain (inline re-login on detected expiry) and the
+lookup still ends without a paint code, the pre-heal legs are treated as
+void and the whole VIN is retried once on the live session — because the
+one leg that carries the VIN may have been the one that ran dead. This is
+the net that catches the SPA-estate half-alive case, where a dead session
+gets the catalogue's shell (no VIN box, no password field) instead of a
+login redirect, so neither layer 3's signature nor B2's timeout wording
+ever matches.
+
 Layer 3 is what keeps layer 1's threshold from mattering much: get it
 slightly wrong and a stale lookup is merely *slow* rather than *wrong* —
 subject to the `_force_relogin` caveat above, which is unmeasured. The idle

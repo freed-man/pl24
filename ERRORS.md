@@ -323,6 +323,17 @@ Two layers of automatic recovery now handle this:
   longer, so it re-submits rather than lengthening the 10s window. This is
   per-leg and capped — it does not multiply across the
   catalog/sibling/dashboard chain.
+- **Heal-voids-prior-legs retry (C1, 2026-08-03).** If the session was
+  re-established at ANY point mid-lookup (a leg detected expiry and
+  re-logged-in inline) and no paint code was found, every leg that ran
+  BEFORE the heal was driving a dead session and its failure is void — so
+  the whole VIN gets one retry on the now-live session, via the same
+  bounded wrapper as B2. Proven necessary live: a squeezed-out session
+  made the routed VW leg fail `VIN box not visible` (the SPA serves its
+  shell to a dead session — no VIN box, no password field), the
+  commercial leg healed, and the chain concluded `not_found_as_routed`
+  for a vehicle that is `A7N`. Log line: `session was re-established
+  mid-lookup … flagging for one whole-VIN retry`.
 - **Whole-VIN retry (B2).** The specific combination "catalog **timeout**
   + dashboard **could-not-assign**" is a known transient false-not-found.
   It's flagged `retryable_transient` and gets **one** whole-VIN retry via
