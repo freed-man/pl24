@@ -62,7 +62,6 @@ Config via env (all optional except credentials, which lookup.py requires):
 import hmac
 import json
 import os
-import re
 import queue
 import threading
 import time
