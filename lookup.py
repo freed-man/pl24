@@ -922,7 +922,11 @@ def _complete_login_from_current_page(page: Page,
 # login of every kind — cold start, layer 1 proactive, layer 2 in-place,
 # layer 3 forced, and the inline heals inside _try_catalog/_try_dashboard —
 # funnels through _complete_login_from_current_page, so bumping here and
-# nowhere else cannot miss one. lookup_vin snapshots it on entry; a changed
+# nowhere else cannot miss one. lookup_vin_with_retry snapshots it PER
+# ATTEMPT, at the wrapper — deliberately NOT inside lookup_vin, whose eight
+# return statements meant an on-entry/at-exit check there covered exactly
+# one exit and silently missed the rest (found and corrected 2026-08-03,
+# same day it shipped). A changed
 # value at exit means the session was re-established MID-lookup, i.e. some
 # prefix of the fallback chain ran against a dead session and its failures
 # are void. Proven necessary 2026-08-03 (live): a squeezed-out session made
