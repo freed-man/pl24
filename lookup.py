@@ -1183,65 +1183,67 @@ def submit_vin(page: Page, vin: str, *, source: str) -> tuple[bool, str | None]:
 
 # ---------- vehicle data extraction -----------------------------------------
 
-# PSA-built vehicles (Toyota Proace family; K0 and G9 platforms) render
-# attributes as `B0` + FAMILY LETTER + a 2-character payload:
+# PSA-built vehicles (Toyota Proace family) render attributes as `B0` +
+# FAMILY LETTER + a 2-character payload:
 #
 #     B0CK0 -> PROACE VERSO (K0)          C = model,   payload K0
 #     B0MP0 -> NON-METALLIC PAINT         M = finish,  payload P0
-#     B0NVL -> PLATINUM GREY PAINT        N = COLOUR,  payload VL
-#     B0PCY -> CLAUDIA LEATHER "CY"       P = fabric,  payload CY
+#     B0NVL -> PLATINUM GREY PAINT        N = colour,  payload VL
 #     B0RFX -> BLACK "FX"                 R = trim,    payload FX
 #
-# The payload is only TWO characters; the paint code's leading character
-# is NOT on the page. It is "E":
+# THREE RULES FOR DERIVING A PAINT CODE FROM THIS BLOCK HAVE BEEN TRIED
+# AND ALL THREE WERE WRONG (2026-08-07). No code is derived here now.
+# The history is kept in full so nobody re-derives any of them:
 #
-#     B0NVL -> EVL   Basaltgrau Metallic   (DEALER-CONFIRMED)
-#     B0NWP -> EWP   Arctic White          (DEALER-CONFIRMED, and seen on
-#                                           BOTH the K0 and G9 platforms.
-#                                           This one was PREDICTED by the
-#                                           rule before the dealer was
-#                                           asked — the rule was already
-#                                           written and shipped when the
-#                                           confirmation came back, so it
-#                                           is a successful prediction and
-#                                           not a fit to known data.)
-#     B0NEU -> EEU   Nautilus Metallic     (dataset: same hex and model
-#                                           tags as the ambiguous NEU)
+#   1. "the payload IS the code" -> emitted NVL, NWP, NM0, NP0, none of
+#      which exist under any marque. Survived its first sample only
+#      because PSA files one colour under BOTH NEU and EEU, so the single
+#      ambiguous case in the set was the case we happened to test.
+#   2. "the paint row is whichever value ends in PAINT" -> on the G9 van
+#      TWO rows qualify (B0MP0 is the FINISH type) and the wrong one won,
+#      returning MP0.
+#   3. "code = 'E' + payload" -> FALSIFIED twice over.
 #
-# TWO EARLIER RULES WERE SHIPPED AND REVERTED HERE ON 2026-08-07. Both
-# reached production; one delivered a fabricated code to a live caller.
-# They are recorded because each failure mode is invisible to a
-# regression battery, which can only check that we return what the page
-# says — not that the page says the truth:
+# The full dealer-confirmed table, which kills rules 1 and 3 together:
 #
-#   1. "the payload IS the code" -> emitted NVL, NWP, NM0, NP0: NONE of
-#      which exist under any marque. It survived its first sample only
-#      because PSA files that one colour under BOTH NEU and EEU, so the
-#      one ambiguous case in the set was the case we happened to test.
-#      Base rates explain it structurally: Toyota has 26 three-character
-#      codes beginning E and 2 beginning N, so a rule that can only emit
-#      N?? was never viable.
-#   2. "the paint row is the one whose value ends in PAINT" -> on the G9
-#      van TWO rows qualify (B0MP0 "NON-METALLIC PAINT" is the FINISH
-#      type) and the wrong one won, returning MP0.
+#     page key   value              TRUE CODE   payload=last2   prefix
+#     B0NEU      SAND PAINT         NEU         yes             N
+#     B0NVL      PLATINUM GREY      EVL         yes             E
+#     B0NWP      BANQUISE WHITE     EWP         yes             E
+#     B0NWP (G9) BANQUISE WHITE     EWP         yes             E
+#     B0NF4      ARTENSE GREY       KCA         NO              K
 #
-# Hence the anchor below is the FAMILY LETTER N, which makes the M-family
-# row structurally unreachable rather than merely deprioritised, AND the
-# value must still end in PAINT. Both must hold; either alone has already
-# been shown insufficient. A colour row that fails either test yields
-# nothing, which is the correct outcome — accuracy over coverage.
+# Prefixes run N, E, E, E, K — not constant and not present on the page.
+# Rule 1 is right only on NEU; rule 3 only on EVL/EWP. Each was
+# "confirmed" by precisely the samples that could not distinguish it,
+# which is how all three reached production. The Proace City breaks the
+# payload half as well: page payload F4, true code KCA, and the string
+# "KCA" occurs ZERO times in that DOM.
 #
-# Applied LAST, only when no conventional pattern matched, so no proven
-# estate can be preempted by this one.
+# CONCLUSION: the manufacturer paint code is NOT PRESENT on PSA pages.
+# The page carries a two-character build-spec payload plus a marque
+# colour name. No regex can recover what is not there. This is a
+# coverage fact about partslink24's PSA estate, not a missing feature.
+#
+# The common thread: the paint code's leading character is NOT PRESENT ON
+# THE PAGE, and every attempt to reconstruct it has been an inference
+# about PSA's coding scheme that a regression battery cannot check. A
+# battery can only verify that we return what the page says, never that
+# the page says the truth. All three were caught by EXTERNAL ground truth
+# (a dealer system, a dataset query) after reaching production.
+#
+# DO NOT re-enable. The prefix is unobservable and the payload is not
+# even reliable. If PSA coverage is ever wanted, the only viable route is
+# the colour NAME ("ARTENSE GREY", "BANQUISE WHITE") resolved against a
+# dataset that holds PSA marque names — a coloureg-side capability, not
+# an extraction rule, and one that must be validated the same way these
+# were falsified: against a dealer system, before shipping.
+#
+# The regex below IS still used, but only by wait_for_vehicle_data, where
+# recognising a rendered PSA page saves ~10s per lookup. That use cannot
+# produce a wrong answer: it only decides when to stop polling.
 PSA_BCODE_COLOUR_RE = re.compile(
     r"\bB[0-9]N([A-Z0-9]{2})\b[\s:]*[A-Z][A-Z0-9 /-]{2,40}?\s+PAINT\b")
-PSA_CODE_PREFIX = "E"
-
-
-def _extract_psa_bcode_colour(text: str) -> str:
-    """Paint code from a PSA B-code attribute block, or '' if absent."""
-    m = PSA_BCODE_COLOUR_RE.search(text)
-    return PSA_CODE_PREFIX + m.group(1) if m else ""
 
 
 PAINT_CODE_PATTERNS = [
@@ -1915,12 +1917,10 @@ def extract_paint_code(text: str) -> str:
         candidate = _normalise_code(m.group(1).upper())
         if _is_valid_code(candidate):
             return candidate
-    # PSA B-code estate last: only reachable when every conventional
-    # pattern above has declined, so a proven estate can never be
-    # preempted by the reconstructed-prefix rule.
-    psa = _extract_psa_bcode_colour(text)
-    if psa and _is_valid_code(psa):
-        return _normalise_code(psa)
+    # PSA B-code reconstruction is DISABLED — see PSA_BCODE_COLOUR_RE.
+    # The regex itself is still used by wait_for_vehicle_data (a timing
+    # optimisation that cannot produce a wrong answer), but nothing
+    # derives a CODE from it any more.
     return ""
 
 
