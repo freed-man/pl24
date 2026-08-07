@@ -1246,6 +1246,19 @@ PSA_BCODE_COLOUR_RE = re.compile(
     r"\bB[0-9]N([A-Z0-9]{2})\b[\s:]*[A-Z][A-Z0-9 /-]{2,40}?\s+PAINT\b")
 
 
+# EXTRACTION, NEVER INFERENCE — the standing rule for this list, written
+# 2026-08-07 after three PSA rules shipped wrong in one day. A paint code
+# returned from here must be a VERBATIM SUBSTRING OF THE PAGE, captured
+# by a group. It must never be assembled, prefixed, or otherwise
+# reconstructed from page fragments plus an assumption: all three failed
+# rules were reconstructions (payload-as-code, row-selection-by-suffix,
+# "E"+payload), every pattern that has ever held is an observation, and
+# the difference is checkable at review time — if a candidate code is
+# built by string concatenation anywhere outside re.Match.group, it is
+# inference and it does not ship. Regression batteries cannot police
+# this line: they verify that we return what the page says, never that
+# the page says the truth. Only external ground truth (a dealer system,
+# a dataset) can, which is why no new extraction shape ships without it.
 PAINT_CODE_PATTERNS = [
 
     # VW/Audi: "Exterior color / Paint Code\n8E / A7W" — code after the slash.
@@ -1798,14 +1811,22 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
         # five Proace lookups paid the full 10s, and three of the five
         # then silent-timed-out and re-submitted for a second 10s.
         #
-        # Safe because this is the same expression the extractor uses: if
-        # it matches, the paint code IS present and returning is correct
-        # by definition, not merely faster. Verified against five real
+        # Safe because a match proves the ATTRIBUTE BLOCK HAS RENDERED —
+        # nothing more. (An earlier version of this comment claimed a
+        # match meant the paint code was present; that was rule 3's
+        # theory, and the Proace City falsified it: its colour row
+        # matches this expression while its true code, KCA, appears
+        # nowhere in the DOM.) Rendered is all the wait loop needs:
+        # further polling cannot add content to a finished page, so
+        # returning now merely converts a 10-20s wait into an immediate,
+        # equally honest result — usually paint_data_missing, since no
+        # code is derivable from this estate. Verified against five real
         # Proace dumps (matches the four that carry attributes, correctly
         # declines the 2024 van that carries none) and against the
         # conventional VW / Ford / Hyundai / Mini / PSA-Peugeot page
         # shapes, none of which it matches — no other estate renders
-        # B-codes at all.
+        # B-codes at all. This is a WHEN-to-stop signal only; it can
+        # never influence WHAT is returned.
         if VEHICLE_DATA_NEEDLE.search(text) or PSA_BCODE_COLOUR_RE.search(text):
             return text
         # Catalogue-candidate table (old-Struts brands, e.g. Hyundai/Kia).
