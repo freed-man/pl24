@@ -1183,7 +1183,46 @@ def submit_vin(page: Page, vin: str, *, source: str) -> tuple[bool, str | None]:
 
 # ---------- vehicle data extraction -----------------------------------------
 
+# PSA-built Toyota (Proace / Proace Verso, K0 — a rebadged PSA van, which
+# is why it renders nothing like the rest of the Toyota estate). The SPA
+# lists vehicle attributes as PSA label/value pairs where THE LABEL IS THE
+# PREFIX PLUS THE CODE and the value is the human text:
+#
+#     B0NEU  ->  SAND PAINT          <- paint code NEU, colour "Sand"
+#     B0P0U  ->  TWO-TONE CURITIBA FABRIC "0U"
+#     B0RFY  ->  BISE GREY "CY"      <- trim colour, NOT paint
+#     B0MM0  ->  PAINTED EXTERIOR TRIM TYPE
+#
+# Confirmed against the live dump for YARVEEHZ8GZ154706 (2026-08-07):
+# paint code NEU. WHICH row is the paint row is decided by the VALUE
+# ending in the word PAINT — not by guessing PSA's attribute-letter grid,
+# which an earlier version of this patch did from a single sample and
+# which this replaces. That anchor is what excludes the two traps above:
+# B0MM0's value ends in TYPE (so "PAINTED" cannot match), and B0RFY is a
+# colour name with no PAINT suffix. Both are asserted in the fuzz battery.
+#
+# CODE ONLY — the value text is deliberately NOT returned as the colour
+# name. On this marque the whole value is a marker, not a saleable name:
+# coloureg holds NEU as "Nautilus Metallic", and its enrichment fills the
+# name from the code ONLY when the description arrives empty. Sending
+# "Sand" would pass straight through and print `NEU - Sand` beside a
+# Nautilus Metallic swatch, a name no supplier lists. Empty description
+# is therefore the correct output and costs nothing commercially, since
+# enrichment populates it. Accepted trade (agreed with the coloureg side
+# 2026-08-07): if a future PSA code is absent from that dataset the row
+# falls to name_only and earns nothing, rather than earning on a wrong
+# name — accuracy over coverage. The marker text stays recoverable from a
+# --debug dump if it is ever needed.
+#
+# Scope note: observed only on the K0 platform. Prefix allowed as B<digit>
+# rather than literal B0 because that variation is cheap and cannot
+# collide — no other estate renders B-codes at all. Widen further ONLY
+# with dumps in hand.
+PSA_BCODE_PAINT_RE = re.compile(
+    r"\bB[0-9]([A-Z0-9]{3})\b[\s:]*[A-Z][A-Z0-9 /-]{2,40}?\s+PAINT\b")
+
 PAINT_CODE_PATTERNS = [
+
     # VW/Audi: "Exterior color / Paint Code\n8E / A7W" — code after the slash.
     # The (?>...) atomic groups are load-bearing, not style. With plain
     # \s* / [A-Z0-9]+ this pattern backtracks QUADRATICALLY when the label
@@ -1282,6 +1321,17 @@ PAINT_CODE_PATTERNS = [
         r"\s*[:\n]\s*([A-Z0-9]{2,8})",
         re.I,
     ),
+
+    # LAST BY DESIGN — a fallback, never a preemption. This is the only
+    # single-sample pattern in the list; every pattern above it is proven
+    # across the regression VINs. A K0 page that carries BOTH a
+    # conventional paint row and PSA B-codes must keep answering exactly
+    # as it does today, so this can only fire when nothing else matched.
+    # (Placed first in the first cut of this patch, 2026-08-07; corrected
+    # the same day after the coloureg side noted that YARVEAHXKGZ151558
+    # already resolves via another path — precisely the collision this
+    # ordering makes impossible.)
+    PSA_BCODE_PAINT_RE,
 ]
 
 # Captures the human-readable colour name where the page provides one.
@@ -1293,21 +1343,6 @@ PAINT_CODE_PATTERNS = [
 # VW/Audi and Nissan/Vauxhall don't include a colour name in their paint
 # row, so this returns "" for those.
 PAINT_DESCRIPTION_PATTERNS = [
-    # PSA-built Toyota (Proace/Proace Verso, K0 platform): the SPA renders
-    # vehicle attributes as PSA B-code label/value pairs, and the exterior
-    # colour arrives as a NAME under the B0NE? attribute — observed live
-    # 2026-08-07 on YARVEEHZ8GZ154706: `B0NEU` -> "SAND PAINT" ("Sand" is
-    # the K0 Sable). No paint CODE exists anywhere in that DOM, so name_only
-    # (the Ford precedent) is the correct ceiling for this shape.
-    #
-    # DELIBERATELY NARROW — single-sample scope. Anchored on the B0NE
-    # attribute family AND the trailing " PAINT", because the neighbouring
-    # B0MM0 value "PAINTED EXTERIOR TRIM TYPE" must not match (PAINTED does
-    # not end the value with the word PAINT), and no other estate renders
-    # B-codes at all. If other K0 colours turn out to use a different
-    # family letter, WIDEN ONLY WITH DUMPS in hand — never by guessing the
-    # family grid. Lazy bounded capture keeps the ReDoS sweep happy.
-    re.compile(r"\bB0NE[A-Z0-9]\b[\s:]*([A-Z][A-Z /-]{2,40}?)\s+PAINT\b"),
 
     # BMW/MINI format. The name run may be followed by a separate
     # "(FINISH)" paren before the "(CODE)" paren — e.g. "MOONWALK GREY
