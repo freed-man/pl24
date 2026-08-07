@@ -1183,43 +1183,57 @@ def submit_vin(page: Page, vin: str, *, source: str) -> tuple[bool, str | None]:
 
 # ---------- vehicle data extraction -----------------------------------------
 
-# PSA-built Toyota (Proace / Proace Verso, K0 — a rebadged PSA van, which
-# is why it renders nothing like the rest of the Toyota estate). The SPA
-# lists vehicle attributes as PSA label/value pairs where THE LABEL IS THE
-# PREFIX PLUS THE CODE and the value is the human text:
+# PSA-built vehicles (Toyota Proace family; K0 and G9 platforms) render
+# attributes as `B0` + FAMILY LETTER + a 2-character payload:
 #
-#     B0NEU  ->  SAND PAINT          <- paint code NEU, colour "Sand"
-#     B0P0U  ->  TWO-TONE CURITIBA FABRIC "0U"
-#     B0RFY  ->  BISE GREY "CY"      <- trim colour, NOT paint
-#     B0MM0  ->  PAINTED EXTERIOR TRIM TYPE
+#     B0CK0 -> PROACE VERSO (K0)          C = model,   payload K0
+#     B0MP0 -> NON-METALLIC PAINT         M = finish,  payload P0
+#     B0NVL -> PLATINUM GREY PAINT        N = COLOUR,  payload VL
+#     B0PCY -> CLAUDIA LEATHER "CY"       P = fabric,  payload CY
+#     B0RFX -> BLACK "FX"                 R = trim,    payload FX
 #
-# Confirmed against the live dump for YARVEEHZ8GZ154706 (2026-08-07):
-# paint code NEU. WHICH row is the paint row is decided by the VALUE
-# ending in the word PAINT — not by guessing PSA's attribute-letter grid,
-# which an earlier version of this patch did from a single sample and
-# which this replaces. That anchor is what excludes the two traps above:
-# B0MM0's value ends in TYPE (so "PAINTED" cannot match), and B0RFY is a
-# colour name with no PAINT suffix. Both are asserted in the fuzz battery.
+# The payload is only TWO characters; the paint code's leading character
+# is NOT on the page. It is "E":
 #
-# CODE ONLY — the value text is deliberately NOT returned as the colour
-# name. On this marque the whole value is a marker, not a saleable name:
-# coloureg holds NEU as "Nautilus Metallic", and its enrichment fills the
-# name from the code ONLY when the description arrives empty. Sending
-# "Sand" would pass straight through and print `NEU - Sand` beside a
-# Nautilus Metallic swatch, a name no supplier lists. Empty description
-# is therefore the correct output and costs nothing commercially, since
-# enrichment populates it. Accepted trade (agreed with the coloureg side
-# 2026-08-07): if a future PSA code is absent from that dataset the row
-# falls to name_only and earns nothing, rather than earning on a wrong
-# name — accuracy over coverage. The marker text stays recoverable from a
-# --debug dump if it is ever needed.
+#     B0NVL -> EVL   Basaltgrau Metallic   (dealer-confirmed)
+#     B0NWP -> EWP   Arctic White          (seen on BOTH K0 and G9)
+#     B0NEU -> EEU   Nautilus Metallic
 #
-# Scope note: observed only on the K0 platform. Prefix allowed as B<digit>
-# rather than literal B0 because that variation is cheap and cannot
-# collide — no other estate renders B-codes at all. Widen further ONLY
-# with dumps in hand.
-PSA_BCODE_PAINT_RE = re.compile(
-    r"\bB[0-9]([A-Z0-9]{3})\b[\s:]*[A-Z][A-Z0-9 /-]{2,40}?\s+PAINT\b")
+# TWO EARLIER RULES WERE SHIPPED AND REVERTED HERE ON 2026-08-07. Both
+# reached production; one delivered a fabricated code to a live caller.
+# They are recorded because each failure mode is invisible to a
+# regression battery, which can only check that we return what the page
+# says — not that the page says the truth:
+#
+#   1. "the payload IS the code" -> emitted NVL, NWP, NM0, NP0: NONE of
+#      which exist under any marque. It survived its first sample only
+#      because PSA files that one colour under BOTH NEU and EEU, so the
+#      one ambiguous case in the set was the case we happened to test.
+#      Base rates explain it structurally: Toyota has 26 three-character
+#      codes beginning E and 2 beginning N, so a rule that can only emit
+#      N?? was never viable.
+#   2. "the paint row is the one whose value ends in PAINT" -> on the G9
+#      van TWO rows qualify (B0MP0 "NON-METALLIC PAINT" is the FINISH
+#      type) and the wrong one won, returning MP0.
+#
+# Hence the anchor below is the FAMILY LETTER N, which makes the M-family
+# row structurally unreachable rather than merely deprioritised, AND the
+# value must still end in PAINT. Both must hold; either alone has already
+# been shown insufficient. A colour row that fails either test yields
+# nothing, which is the correct outcome — accuracy over coverage.
+#
+# Applied LAST, only when no conventional pattern matched, so no proven
+# estate can be preempted by this one.
+PSA_BCODE_COLOUR_RE = re.compile(
+    r"\bB[0-9]N([A-Z0-9]{2})\b[\s:]*[A-Z][A-Z0-9 /-]{2,40}?\s+PAINT\b")
+PSA_CODE_PREFIX = "E"
+
+
+def _extract_psa_bcode_colour(text: str) -> str:
+    """Paint code from a PSA B-code attribute block, or '' if absent."""
+    m = PSA_BCODE_COLOUR_RE.search(text)
+    return PSA_CODE_PREFIX + m.group(1) if m else ""
+
 
 PAINT_CODE_PATTERNS = [
 
@@ -1322,16 +1336,6 @@ PAINT_CODE_PATTERNS = [
         re.I,
     ),
 
-    # LAST BY DESIGN — a fallback, never a preemption. This is the only
-    # single-sample pattern in the list; every pattern above it is proven
-    # across the regression VINs. A K0 page that carries BOTH a
-    # conventional paint row and PSA B-codes must keep answering exactly
-    # as it does today, so this can only fire when nothing else matched.
-    # (Placed first in the first cut of this patch, 2026-08-07; corrected
-    # the same day after the coloureg side noted that YARVEAHXKGZ151558
-    # already resolves via another path — precisely the collision this
-    # ordering makes impossible.)
-    PSA_BCODE_PAINT_RE,
 ]
 
 # Captures the human-readable colour name where the page provides one.
@@ -1885,6 +1889,12 @@ def extract_paint_code(text: str) -> str:
         candidate = _normalise_code(m.group(1).upper())
         if _is_valid_code(candidate):
             return candidate
+    # PSA B-code estate last: only reachable when every conventional
+    # pattern above has declined, so a proven estate can never be
+    # preempted by the reconstructed-prefix rule.
+    psa = _extract_psa_bcode_colour(text)
+    if psa and _is_valid_code(psa):
+        return _normalise_code(psa)
     return ""
 
 
