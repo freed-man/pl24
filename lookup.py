@@ -1293,6 +1293,22 @@ PAINT_CODE_PATTERNS = [
 # VW/Audi and Nissan/Vauxhall don't include a colour name in their paint
 # row, so this returns "" for those.
 PAINT_DESCRIPTION_PATTERNS = [
+    # PSA-built Toyota (Proace/Proace Verso, K0 platform): the SPA renders
+    # vehicle attributes as PSA B-code label/value pairs, and the exterior
+    # colour arrives as a NAME under the B0NE? attribute — observed live
+    # 2026-08-07 on YARVEEHZ8GZ154706: `B0NEU` -> "SAND PAINT" ("Sand" is
+    # the K0 Sable). No paint CODE exists anywhere in that DOM, so name_only
+    # (the Ford precedent) is the correct ceiling for this shape.
+    #
+    # DELIBERATELY NARROW — single-sample scope. Anchored on the B0NE
+    # attribute family AND the trailing " PAINT", because the neighbouring
+    # B0MM0 value "PAINTED EXTERIOR TRIM TYPE" must not match (PAINTED does
+    # not end the value with the word PAINT), and no other estate renders
+    # B-codes at all. If other K0 colours turn out to use a different
+    # family letter, WIDEN ONLY WITH DUMPS in hand — never by guessing the
+    # family grid. Lazy bounded capture keeps the ReDoS sweep happy.
+    re.compile(r"\bB0NE[A-Z0-9]\b[\s:]*([A-Z][A-Z /-]{2,40}?)\s+PAINT\b"),
+
     # BMW/MINI format. The name run may be followed by a separate
     # "(FINISH)" paren before the "(CODE)" paren — e.g. "MOONWALK GREY
     # (METALLIC) (B71)". We KEEP the finish in the description (-> "Moonwalk
