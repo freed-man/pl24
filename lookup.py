@@ -1195,9 +1195,18 @@ def submit_vin(page: Page, vin: str, *, source: str) -> tuple[bool, str | None]:
 # The payload is only TWO characters; the paint code's leading character
 # is NOT on the page. It is "E":
 #
-#     B0NVL -> EVL   Basaltgrau Metallic   (dealer-confirmed)
-#     B0NWP -> EWP   Arctic White          (seen on BOTH K0 and G9)
-#     B0NEU -> EEU   Nautilus Metallic
+#     B0NVL -> EVL   Basaltgrau Metallic   (DEALER-CONFIRMED)
+#     B0NWP -> EWP   Arctic White          (DEALER-CONFIRMED, and seen on
+#                                           BOTH the K0 and G9 platforms.
+#                                           This one was PREDICTED by the
+#                                           rule before the dealer was
+#                                           asked — the rule was already
+#                                           written and shipped when the
+#                                           confirmation came back, so it
+#                                           is a successful prediction and
+#                                           not a fit to known data.)
+#     B0NEU -> EEU   Nautilus Metallic     (dataset: same hex and model
+#                                           tags as the ambiguous NEU)
 #
 # TWO EARLIER RULES WERE SHIPPED AND REVERTED HERE ON 2026-08-07. Both
 # reached production; one delivered a fabricated code to a live caller.
@@ -1778,7 +1787,24 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
             return text
         if any(p in lower for p in VIN_NOT_FOUND_PHRASES):
             return text
-        if VEHICLE_DATA_NEEDLE.search(text):
+        # PSA_BCODE_COLOUR_RE alongside the needle: the PSA-built estate
+        # (Toyota Proace, K0/G9) labels its colour row `B0N?? -> <name>
+        # PAINT` and carries NONE of the phrases the needle looks for, so
+        # without this the loop cannot recognise a fully-rendered PSA page
+        # and ALWAYS runs to the deadline, surviving only on the
+        # PAGE_LOADED fallback below — measured 2026-08-07: every one of
+        # five Proace lookups paid the full 10s, and three of the five
+        # then silent-timed-out and re-submitted for a second 10s.
+        #
+        # Safe because this is the same expression the extractor uses: if
+        # it matches, the paint code IS present and returning is correct
+        # by definition, not merely faster. Verified against five real
+        # Proace dumps (matches the four that carry attributes, correctly
+        # declines the 2024 van that carries none) and against the
+        # conventional VW / Ford / Hyundai / Mini / PSA-Peugeot page
+        # shapes, none of which it matches — no other estate renders
+        # B-codes at all.
+        if VEHICLE_DATA_NEEDLE.search(text) or PSA_BCODE_COLOUR_RE.search(text):
             return text
         # Catalogue-candidate table (old-Struts brands, e.g. Hyundai/Kia).
         # Carries no "please select" text, so unlike the model picker above
