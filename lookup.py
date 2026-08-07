@@ -1202,7 +1202,15 @@ def submit_vin(page: Page, vin: str, *, source: str) -> tuple[bool, str | None]:
 #   2. "the paint row is whichever value ends in PAINT" -> on the G9 van
 #      TWO rows qualify (B0MP0 is the FINISH type) and the wrong one won,
 #      returning MP0.
-#   3. "code = 'E' + payload" -> FALSIFIED twice over.
+#   3. "code = 'E' + payload" -> NEVER CONFIRMED, only unfalsified for a
+#      few hours. Read the table below: the very first row is a
+#      DEALER-CONFIRMED NEU, which rule 3 would emit as EEU. That
+#      counter-example was in hand BEFORE the rule was called evidenced,
+#      sitting under the prefix column, and was read past because the
+#      search was for what killed the rule rather than for what the rule
+#      could not explain. It survived only because PSA files that one
+#      colour under both NEU and EEU, so the customer outcome happened
+#      to be identical. The Proace City later killed it outright.
 #
 # The full dealer-confirmed table, which kills rules 1 and 3 together:
 #
@@ -1227,7 +1235,19 @@ def submit_vin(page: Page, vin: str, *, source: str) -> tuple[bool, str | None]:
 #
 # The common thread: the paint code's leading character is NOT PRESENT ON
 # THE PAGE, and every attempt to reconstruct it has been an inference
-# about PSA's coding scheme that a regression battery cannot check. A
+# about PSA's coding scheme that a regression battery cannot check.
+#
+# NOR CAN COLOUREG'S UNRESOLVABLE-CODE LOG, and this must not be
+# misread. That log flags a delivered code that resolves to nothing in
+# the paint dataset. It caught NVL and NWP — but ONLY because PSA's
+# namespace happens not to contain them. THE GATE'S CATCH RATE IS A
+# PROPERTY OF THE FABRICATION, NOT OF THE EXTRACTOR: a scheme that
+# fabricates into occupied namespace passes silently every time, and
+# EEU is the standing proof — it resolved perfectly, right hex, right
+# model tags, and was the wrong answer for that car. A quiet log
+# therefore says nothing about extractor health. The only instrument
+# for that class is periodic verification of live output against a
+# dealer system. A
 # battery can only verify that we return what the page says, never that
 # the page says the truth. All three were caught by EXTERNAL ground truth
 # (a dealer system, a dataset query) after reaching production.
