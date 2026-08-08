@@ -1958,6 +1958,13 @@ def _extract_hyundai_kia_colour(text: str) -> tuple[str, str]:
                   text, re.I)
     if not m:
         return "", ""
+    # Interior guard (see _match_is_interior). These pre-pattern
+    # extractors run BEFORE the guarded pattern loop, so the guard
+    # must be applied at their own match site or they bypass it
+    # entirely — found 2026-08-08: "Interior Paint Code\\n851
+    # (BLACK - leather)" returned "Black" as the exterior name.
+    if _match_is_interior(text, m.start()):
+        return "", ""
     val = m.group(1).strip()
     code = ""
     bm = re.search(r"\[([A-Z0-9]{1,4})\]\s*$", val)
@@ -2064,7 +2071,35 @@ def _is_valid_code(code: str) -> bool:
     words like ELECTRIC, PHANTOM, SLEEK, MACHINE, METALLIC, CHAMPION
     are 4+ letters all-alphabetic and get rejected.
 
-    Revisit if a real 4+-letter all-alpha code ever turns up.
+    THE REVISIT CONDITION IS NOW MET — recorded 2026-08-08, deliberately
+    NOT acted on. Three real manufacturer codes are 4+ letters with no
+    digit and are therefore DROPPED here:
+
+        TEKPN  Renault      TERQH  Dacia      PSTDD  Ford
+
+    (all three seen in VDG's output via coloureg; PN3BJ and OV369 from
+    the same families pass, because they contain digits). All three
+    makes ARE routed by this scraper, and five of the code patterns can
+    capture a 5-letter token, so the drop is reachable: the code would
+    be extracted correctly and then silently discarded here, surfacing
+    as paint_data_missing rather than a wrong answer.
+
+    NOT relaxed, because no safe discriminator exists on the evidence we
+    have. The rule's job is to reject colour WORDS, and the obvious
+    tests do not separate the two populations: a vowel-ratio threshold
+    that admits TEKPN (0.2) also admits GREY (0.25), and a length rule
+    cannot tell PSTDD from SLEEK. Guessing a discriminator is exactly
+    the move that produced three wrong PSA rules the previous day.
+
+    The correct fix, when a real case appears, is upstream: stop the
+    name-shaped patterns capturing names in the first place, using the
+    dump from that case. Until then this is a known FALSE-NEGATIVE class
+    (silently returns nothing) and never a false positive, which is the
+    right direction for it to fail in.
+
+    TRIPWIRE: if a Renault, Dacia or Ford lookup returns
+    paint_data_missing on a page that visibly shows a 4+-letter code,
+    this function is the cause.
     """
     if not code:
         return False
@@ -2206,6 +2241,13 @@ def _extract_mercedes_colour(text: str) -> tuple[str, str]:
     m = re.search(r"Paint\s*Code\s*[:\n\t ]+(\d{3,4})\s*\(([^)]*)\)", text, re.I)
     if not m:
         return "", ""
+    # Interior guard (see _match_is_interior). These pre-pattern
+    # extractors run BEFORE the guarded pattern loop, so the guard
+    # must be applied at their own match site or they bypass it
+    # entirely — found 2026-08-08: "Interior Paint Code\\n851
+    # (BLACK - leather)" returned "Black" as the exterior name.
+    if _match_is_interior(text, m.start()):
+        return "", ""
     code = m.group(1)
     name = m.group(2).strip()
     name = re.split(r"\s+-\s+", name)[0].strip()           # "- Metallic finish"
@@ -2243,6 +2285,13 @@ def _extract_psa_body_colour(text: str) -> str:
     m = re.search(r"(?:^|\n)\s*BODY\s*COLOU?R\s*[:\n\t ]+\s*([^\n]+)",
                   text, re.I)
     if not m:
+        return ""
+    # Interior guard (see _match_is_interior). These pre-pattern
+    # extractors run BEFORE the guarded pattern loop, so the guard
+    # must be applied at their own match site or they bypass it
+    # entirely — found 2026-08-08: "Interior Paint Code\\n851
+    # (BLACK - leather)" returned "Black" as the exterior name.
+    if _match_is_interior(text, m.start()):
         return ""
     v = m.group(1).strip()
     # Volvo's equipment tab has a "BODY COLOR   626 POWDER BLUE" line whose
