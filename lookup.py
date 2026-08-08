@@ -1298,6 +1298,12 @@ PSA_BCODE_COLOUR_RE = re.compile(
 #                           prefix the L here: that is reconstruction,
 #                           PSA rule 3's exact move. If the full form is
 #                           ever needed it is coloureg-side mapping.
+#                           Corroborated end-to-end 2026-08-08:
+#                           coloureg's dataset resolves A7N directly,
+#                           and to the same name the dealer gave for
+#                           LA7N (Limestone Grey Metallic). Dealer,
+#                           page and dataset agree — the two notations
+#                           name one colour.
 #                           (2) PRE-slash identified: the 2-char
 #                           exterior ORDER code (Z1 on this car, where
 #                           it also mirrors the "Roof color" row; 8E,
