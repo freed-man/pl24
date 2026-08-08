@@ -1359,8 +1359,13 @@ PAINT_CODE_PATTERNS = [
     # colour / 490" row on the pattern below, untouched. Verified against
     # both Suzuki legs (catalogue and dashboard dumps, identical shape)
     # and against the Volvo, Mercedes, Ford and colour-name negatives.
-    re.compile(r"(?m)^Colou?r[ \t]*\n[ \t]*([A-Z0-9]{2,8})[ \t]*\n"
-               r"[ \t]*Exterior\s*colou?r\b"),
+    # [ \t\r] not [ \t]: under CRLF line endings the bare \t/space class
+    # could not cross the \r, the pattern failed, and extraction fell
+    # through to the "Exterior colour" pattern below — returning the TRIM
+    # code (C05) instead of the body code. A silent wrong answer, not a
+    # miss. Found by metamorphic CRLF-perturbation testing 2026-08-08.
+    re.compile(r"(?m)^Colou?r[ \t\r]*\n[ \t\r]*([A-Z0-9]{2,8})[ \t\r]*\n"
+               r"[ \t\r]*Exterior\s*colou?r\b"),
 
     # VW/Audi: "Exterior color / Paint Code\n8E / A7W" — code after the slash.
     # The (?>...) atomic groups are load-bearing, not style. With plain
@@ -2021,6 +2026,16 @@ def extract_paint_code(text: str) -> str:
     'ELECTRIC' or 'PHANTOM' as if it were a code. When that happens we
     skip and try the next pattern, rather than returning the bad token.
     """
+    # Normalise line endings ONCE, here, before any pattern or helper
+    # sees the text. Several patterns and _match_is_interior reason about
+    # line structure with explicit \n and [ \t] classes, and a stray \r
+    # silently breaks them — under CRLF the Suzuki two-row pattern failed
+    # and extraction fell through to the TRIM code (a wrong answer, not a
+    # miss), while Volvo lost its colour name entirely. Fixing the class
+    # at the boundary is safer than auditing every pattern for \r
+    # tolerance, and it is a no-op on real input (Playwright's inner_text
+    # yields \n), so it costs nothing and closes the whole family.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     # smart first: its two-part "Paint Code" field lists the tridion frame
     # code before the body code, so the generic patterns would grab the
     # frame. The helper picks the body-panel code (and is a no-op on every
@@ -2040,14 +2055,24 @@ def extract_paint_code(text: str) -> str:
     if hk_desc:                       # Hyundai/Kia name present, no usable code
         return ""
     for pat in PAINT_CODE_PATTERNS:
-        m = pat.search(text)
-        if not m:
-            continue
-        if _match_is_interior(text, m.start()):
-            continue
-        candidate = _normalise_code(m.group(1).upper())
-        if _is_valid_code(candidate):
-            return candidate
+        # finditer, not search: the interior guard must skip the MATCH,
+        # not abandon the PATTERN. With search() a page listing the
+        # interior row BEFORE the exterior one lost its code entirely —
+        # "Interior Colour\nBLACK (851)\nExterior Colour:\nCHILI RED
+        # (851)" returned "" because the guard rejected the first match
+        # and `continue` moved to the next pattern, never reaching the
+        # exterior row the SAME pattern would have matched. Found by
+        # metamorphic noise-invariance testing 2026-08-08; the guard
+        # itself (added the same day) introduced it.
+        for m in pat.finditer(text):
+            if _match_is_interior(text, m.start()):
+                continue          # skip THIS match, keep scanning this pattern
+            candidate = _normalise_code(m.group(1).upper())
+            if _is_valid_code(candidate):
+                return candidate
+            break                 # first non-interior match decides this
+                                  # pattern, exactly as search() did — the
+                                  # interior skip is the ONLY semantic change
     # PSA B-code reconstruction is DISABLED — see PSA_BCODE_COLOUR_RE.
     # The regex itself is still used by wait_for_vehicle_data (a timing
     # optimisation that cannot produce a wrong answer), but nothing
@@ -2351,6 +2376,16 @@ def extract_paint_description(text: str) -> str:
     return it Title Cased ("Sterlinggrau"). Returns "" if no description
     is on the page (e.g. VW/Audi don't include one in the paint row, and
     Jeep's COLEST row has the code but no inner-parens name)."""
+    # Normalise line endings ONCE, here, before any pattern or helper
+    # sees the text. Several patterns and _match_is_interior reason about
+    # line structure with explicit \n and [ \t] classes, and a stray \r
+    # silently breaks them — under CRLF the Suzuki two-row pattern failed
+    # and extraction fell through to the TRIM code (a wrong answer, not a
+    # miss), while Volvo lost its colour name entirely. Fixing the class
+    # at the boundary is safer than auditing every pattern for \r
+    # tolerance, and it is a no-op on real input (Playwright's inner_text
+    # yields \n), so it costs nothing and closes the whole family.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     # smart two-part "Paint Code" — pick the body-panel colour word.
     _, smart_desc = _extract_smart_colour(text)
     if smart_desc:
@@ -2372,13 +2407,11 @@ def extract_paint_description(text: str) -> str:
     if psa:
         return psa
     for pat in PAINT_DESCRIPTION_PATTERNS:
-        m = pat.search(text)
-        if m:
-            # Same interior guard as extract_paint_code — the MINI paren
-            # pattern leaks here too ("Interior Colour:\nBLACK (851)"
-            # yielded "Black" as the exterior colour name).
+        # finditer for the same reason as extract_paint_code: skip the
+        # interior MATCH, never abandon the pattern.
+        for m in pat.finditer(text):
             if _match_is_interior(text, m.start()):
-                continue
+                continue          # skip THIS match, keep scanning
             return _titlecase_colour(m.group(1).strip()) if m.group(1) else ""
     return ""
 
