@@ -1266,6 +1266,36 @@ PSA_BCODE_COLOUR_RE = re.compile(
     r"\bB[0-9]N([A-Z0-9]{2})\b[\s:]*[A-Z][A-Z0-9 /-]{2,40}?\s+PAINT\b")
 
 
+# ---------------------------------------------------------------------
+# VERIFICATION LEDGER — which estates have been checked against a DEALER
+# system, and which have only ever been checked for STABILITY.
+#
+# This distinction is the single most important fact about this file and
+# it is not otherwise visible: a green battery proves the extractor
+# returns the same thing every time, never that the thing is right.
+# Suzuki was stable and WRONG for months, certified by its own
+# regression expectation (C05, the trim code). Keep this current.
+#
+#   DEALER-VERIFIED
+#     Suzuki    2026-08-08  ZCF (Swift), 26U (Vitara). Body row, not the
+#                           row partslink24 labels "Exterior color".
+#     Nissan    2026-08-08  Qashqai/Micra/Juke, one shape, pattern via
+#                           the "Exterior color" row. Confirmed correct.
+#     PSA/Toyota Proace
+#               2026-08-07  Verified NOT extractable — dealer codes
+#                           (EVL, EWP, NEU, KCA) are absent from the
+#                           page. Correctly returns nothing.
+#
+#   STABILITY-ONLY (expectations never checked against a dealer)
+#     VW/Audi (A7N, X5Q), Mercedes (9744, 441), Mini (851),
+#     Vauxhall legacy (4CU), VW Commercial (M7P), Ford (name-only),
+#     Hyundai (name-only), Volvo (490), Fiat family (679), Jaguar.
+#
+#   NOTE Volvo shares the "Exterior colour" pattern with Nissan but is
+#   NOT thereby verified: the pattern is confirmed correct for NISSAN's
+#   page, and a different estate can label a different field the same
+#   way. That is precisely how Suzuki went wrong.
+# ---------------------------------------------------------------------
 # EXTRACTION, NEVER INFERENCE — the standing rule for this list, written
 # 2026-08-07 after three PSA rules shipped wrong in one day. A paint code
 # returned from here must be a VERBATIM SUBSTRING OF THE PAGE, captured
