@@ -2203,6 +2203,15 @@ def _extract_smart_colour(text: str) -> tuple[str, str]:
     )
     if not m:
         return "", ""
+    # Interior guard (see _match_is_interior). The regex above uses
+    # "Interior" as a TERMINATOR, which makes the normal two-row page
+    # safe, but the LABEL itself still matches inside "Interior Paint
+    # Code" — verified 2026-08-08: that label with parser-valid content
+    # returned EAA/Black as the exterior paint. Until this guard, the
+    # only thing preventing it was _smart_balanced_paren_groups happening
+    # to decline most malformed inputs, which is safety by accident.
+    if _match_is_interior(text, m.start()):
+        return "", ""
     for code, inner in _smart_balanced_paren_groups(m.group(1)):
         if code.lower() == "inv":
             continue
