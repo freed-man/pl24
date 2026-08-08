@@ -1280,6 +1280,33 @@ PSA_BCODE_COLOUR_RE = re.compile(
 # the page says the truth. Only external ground truth (a dealer system,
 # a dataset) can, which is why no new extraction shape ships without it.
 PAINT_CODE_PATTERNS = [
+    # SUZUKI TWO-ROW SHAPE — MUST PRECEDE THE "Exterior colour" PATTERN
+    # BELOW, because partslink24 labels these two rows the opposite way
+    # round to what the names suggest:
+    #
+    #     Color            26U     <- the BODY paint code
+    #     Exterior color   C01     <- the COMBINATION / trim code
+    #
+    # Confirmed against the Suzuki dealer system 2026-08-08 on two cars:
+    # TSMLYEA1S00702058 (Vitara) -> dealer paint code 26U, page
+    # "Exterior color" C01; and TSMNZC72S00618058 (Swift), whose dealer
+    # record reads BODY COLOR ZCF ("ZCF - RED") with TRIM COLOR /
+    # Combination Color C05.
+    #
+    # This was WRONG IN PRODUCTION for as long as Suzuki has been
+    # supported, and the regression battery certified it: the expected
+    # answer for TSMNZC72S00618058 was recorded as C05 — the trim code —
+    # so every green run reinforced a wrong answer. Nothing in the
+    # extractor could catch that; only a dealer record could, and did.
+    #
+    # STRUCTURAL, not a make guess: the pattern requires BOTH rows
+    # ADJACENT and returns the first. A page carrying only one colour row
+    # cannot match it, which is what keeps Volvo's single "Exterior
+    # colour / 490" row on the pattern below, untouched. Verified against
+    # both Suzuki legs (catalogue and dashboard dumps, identical shape)
+    # and against the Volvo, Mercedes, Ford and colour-name negatives.
+    re.compile(r"(?m)^Colou?r[ \t]*\n[ \t]*([A-Z0-9]{2,8})[ \t]*\n"
+               r"[ \t]*Exterior\s*colou?r\b"),
 
     # VW/Audi: "Exterior color / Paint Code\n8E / A7W" — code after the slash.
     # The (?>...) atomic groups are load-bearing, not style. With plain
@@ -1955,6 +1982,8 @@ def extract_paint_code(text: str) -> str:
         m = pat.search(text)
         if not m:
             continue
+        if _match_is_interior(text, m.start()):
+            continue
         candidate = _normalise_code(m.group(1).upper())
         if _is_valid_code(candidate):
             return candidate
@@ -1963,6 +1992,40 @@ def extract_paint_code(text: str) -> str:
     # optimisation that cannot produce a wrong answer), but nothing
     # derives a CODE from it any more.
     return ""
+
+
+_INTERIOR_RE = re.compile(r"interior", re.I)
+
+
+def _match_is_interior(text: str, start: int) -> bool:
+    r"""True when a pattern matched on a line that names an INTERIOR row.
+
+    A post-match guard rather than a lookbehind on each pattern, so a
+    pattern added later cannot reintroduce the leak by forgetting one.
+    Found 2026-08-08 while auditing the Suzuki field-selection bug: two
+    real leaks existed, and neither pattern looked suspicious on its own.
+
+      - MINI/BMW paren pattern: the leading `(?:Exterior\s*)?` is
+        OPTIONAL, so a bare "Colour:" matches — and nothing prevented
+        "Interior Colour:\nBLACK (851)" from yielding 851/Black as the
+        exterior paint.
+      - The bare "Paint Code" pattern matches inside
+        "Interior color / Paint Code\n8E / A7W". The VW pattern above it
+        correctly declines that line; this one did not.
+
+    Scope is deliberately ONE LINE — the line the match STARTS on, which
+    is the line carrying the label. Widening it to neighbouring lines
+    would be unsafe: partslink24 renders a catalogue nav entry called
+    "INTERIOR PARTS" on these same pages (line 73 of the Suzuki dump,
+    twenty lines from the colour rows), and a windowed check could
+    suppress a legitimate row on a page where that heading happened to
+    land nearby.
+    """
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", start)
+    if line_end == -1:
+        line_end = len(text)
+    return bool(_INTERIOR_RE.search(text[line_start:line_end]))
 
 
 def _is_valid_code(code: str) -> bool:
@@ -2199,6 +2262,11 @@ def extract_paint_description(text: str) -> str:
     for pat in PAINT_DESCRIPTION_PATTERNS:
         m = pat.search(text)
         if m:
+            # Same interior guard as extract_paint_code — the MINI paren
+            # pattern leaks here too ("Interior Colour:\nBLACK (851)"
+            # yielded "Black" as the exterior colour name).
+            if _match_is_interior(text, m.start()):
+                continue
             return _titlecase_colour(m.group(1).strip()) if m.group(1) else ""
     return ""
 

@@ -238,7 +238,7 @@ per the operating constraint):
    mechanism that a new browser engine's timing/rendering could disturb:
    - `WDB2010242F790734` (Mercedes 190E) → `441 / catalog` — the "Please
      select" model-picker auto-handler
-   - `TSMNZC72S00618058` (Suzuki Swift) → `C05` — SPA catalogue timing and
+   - `TSMNZC72S00618058` (Suzuki Swift) → `ZCF` — SPA catalogue timing and
      the silent-timeout retry path
    - `W0L0AHL3565157973` (2006 Vauxhall Astra) → `4CU / catalog:legacy` —
      the legacy-sibling fallback
