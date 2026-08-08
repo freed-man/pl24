@@ -1281,15 +1281,49 @@ PSA_BCODE_COLOUR_RE = re.compile(
 #                           row partslink24 labels "Exterior color".
 #     Nissan    2026-08-08  Qashqai/Micra/Juke, one shape, pattern via
 #                           the "Exterior color" row. Confirmed correct.
+#     VW/Audi   2026-08-08  Golf 5G, WVWZZZAUZFW002714. Dealer code
+#                           LA7N (Limestone Grey Metallic); page row
+#                           "Exterior color / Paint Code -> Z1 / A7N".
+#                           POST-slash confirmed as the paint code —
+#                           this had been the open Suzuki-shaped risk,
+#                           two candidates in one row, choice never
+#                           checked. Three caveats, all load-bearing:
+#                           (1) NOTATION. The page carries only the
+#                           L-STRIPPED form — LA7N occurs ZERO times in
+#                           the DOM — so A7N is the maximal verbatim
+#                           extraction. First ledger entry where the
+#                           extracted string != the dealer string yet is
+#                           its deterministic notation (VW "L" lacquer
+#                           prefix, dropped by parts databases). NEVER
+#                           prefix the L here: that is reconstruction,
+#                           PSA rule 3's exact move. If the full form is
+#                           ever needed it is coloureg-side mapping.
+#                           (2) PRE-slash identified: the 2-char
+#                           exterior ORDER code (Z1 on this car, where
+#                           it also mirrors the "Roof color" row; 8E,
+#                           0E, 2R elsewhere). Not a paint code. Bare
+#                           2-char VW returns (0E, 2R) reach coloureg
+#                           via other page shapes and are genuine
+#                           orderable codes — see corroborate-or-log.
+#                           (3) SCOPE. Checked on one VW; Audi shares
+#                           the row shape (8E / A7W) and moves with the
+#                           estate per the one-check convention. X5Q
+#                           expectation unchanged — now readable as
+#                           L-stripped LX5Q, not itself dealer-checked.
 #     PSA/Toyota Proace
 #               2026-08-07  Verified NOT extractable — dealer codes
 #                           (EVL, EWP, NEU, KCA) are absent from the
 #                           page. Correctly returns nothing.
 #
 #   STABILITY-ONLY (expectations never checked against a dealer)
-#     VW/Audi (A7N, X5Q), Mercedes (9744, 441), Mini (851),
-#     Vauxhall legacy (4CU), VW Commercial (M7P), Ford (name-only),
-#     Hyundai (name-only), Volvo (490), Fiat family (679), Jaguar.
+#     Mercedes (9744, 441), Mini (851), Vauxhall legacy (4CU),
+#     VW Commercial (M7P), Ford (name-only), Hyundai (name-only),
+#     Volvo (490), Fiat family (679), Jaguar.
+#
+#   NOTE VW Commercial is NOT cleared by the VW/Audi entry above, for
+#   the same reason Volvo is not cleared by Nissan: verification
+#   attaches to estates, not to shapes or brand families. If its pages
+#   carry the same compound row, one Transporter/Caddy check clears it.
 #
 #   NOTE Volvo shares the "Exterior colour" pattern with Nissan but is
 #   NOT thereby verified: the pattern is confirmed correct for NISSAN's
@@ -1368,6 +1402,9 @@ PAINT_CODE_PATTERNS = [
                r"[ \t\r]*Exterior\s*colou?r\b"),
 
     # VW/Audi: "Exterior color / Paint Code\n8E / A7W" — code after the slash.
+    # POST-slash choice dealer-verified 2026-08-08 (Golf, LA7N vs page
+    # A7N: L-stripped notation; pre-slash is the 2-char order code) —
+    # detail in the VERIFICATION LEDGER above. Do not prefix the L.
     # The (?>...) atomic groups are load-bearing, not style. With plain
     # \s* / [A-Z0-9]+ this pattern backtracks QUADRATICALLY when the label
     # is present but the value is not: "Exterior color / Paint Code"
