@@ -1299,6 +1299,30 @@ PAINT_CODE_PATTERNS = [
     # so every green run reinforced a wrong answer. Nothing in the
     # extractor could catch that; only a dealer record could, and did.
     #
+    # RESIDUAL RISK, recorded rather than guessed away (2026-08-08 audit).
+    # This pattern is make-AGNOSTIC, like every other in this list — it
+    # fires on any page with the two-row shape, not only Suzuki. It is
+    # verified on Suzuki and unverified elsewhere. The failure it could
+    # cause: a make whose page has a literal "Color" row holding a short
+    # alphanumeric token, immediately followed by "Exterior colour"
+    # holding the REAL paint code — there we would now take the wrong
+    # row. No such page exists among the dumps held (checked: the shape
+    # fires on all three Suzuki dumps and none of the eight others), but
+    # absence of a counter-example is not evidence, as three PSA rules
+    # demonstrated the day before this was written.
+    #
+    # Three cases are excluded BY CONSTRUCTION rather than by hope:
+    # an "Interior color" first row cannot match (the line begins
+    # "Interior", so ^Colou?r fails); a "Color" row holding a NAME cannot
+    # match ([A-Z0-9]{2,8} admits no multi-word value); and single-row
+    # pages cannot match (both rows are required adjacent), which is what
+    # leaves Volvo alone.
+    #
+    # TRIPWIRE: if any NON-Suzuki make begins returning a code that fails
+    # to resolve in coloureg's dataset, suspect this pattern first — the
+    # unresolvable-code log is the signal, and this comment is the reason
+    # to look here.
+    #
     # STRUCTURAL, not a make guess: the pattern requires BOTH rows
     # ADJACENT and returns the first. A page carrying only one colour row
     # cannot match it, which is what keeps Volvo's single "Exterior
