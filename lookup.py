@@ -1321,6 +1321,33 @@ PSA_BCODE_COLOUR_RE = re.compile(
 #                           (EVL, EWP, NEU, KCA) are absent from the
 #                           page. Correctly returns nothing.
 #
+#     Renault/  2026-08-14  Clio V VF1RJA00773682232 -> OV369 "ICE
+#     Dacia                   WHITE BC"; Dacia Spring UU1DBG005RU197157
+#                             -> OVDQH "GREEN LICHEN GREY". Both codes
+#                             AND names confirmed verbatim in Renault
+#                             Dialogys (the dealer system), Body type ->
+#                             BODY COLOUR. No notation divergence, unlike
+#                             VW: page string == dealer string exactly.
+#                             The code is NOT in the Vehicle data panel —
+#                             it is in the COLLAPSED "Equipment"
+#                             accordion, unmounted until clicked, so this
+#                             needed a page-interaction fix as well as a
+#                             pattern (see _expand_equipment_panel).
+#                             OVDQH is digit-free and 5 chars, i.e. the
+#                             _is_valid_code false-negative class fired
+#                             for real; handled by trusted-context
+#                             exemption, not by relaxing the rule.
+#                             CAVEAT: coloureg's dataset has NO row for
+#                             OVDQH, and its single OV369 row is filed
+#                             under dacia with the name "Blanc Glacier
+#                             Verni" — a DIFFERENT string from the
+#                             manufacturer's "ICE WHITE BC" for this VIN.
+#                             Do not add a Renault<->Dacia cross-family
+#                             dataset fallback on that row's strength;
+#                             prefer the page name for these makes.
+#                             Two cars, two makes, both hatchbacks; the
+#                             row shape is unconfirmed on Renault vans.
+#
 #   STABILITY-ONLY (expectations never checked against a dealer)
 #     Mercedes (9744, 441), Mini (851), Vauxhall legacy (4CU),
 #     VW Commercial (M7P), Ford (name-only), Hyundai (name-only),
@@ -1845,6 +1872,44 @@ def _handle_catalog_candidates(page: Page) -> bool:
         return False
 
 
+def _expand_equipment_panel(page: Page) -> bool:
+    """Renault/Dacia hide the paint code behind a COLLAPSED "Equipment"
+    accordion. MUI unmounts a collapsed accordion's children, so the rows
+    are not merely hidden — they are absent from the DOM, and inner_text
+    cannot see them at any timeout. No regex change can reach them; the
+    panel has to be opened. Confirmed on two real dumps (2026-08-14):
+    collapsed, the element is a bare <h3> with aria-expanded="false" and
+    no MuiCollapse sibling at all.
+
+    Gated deliberately:
+      - only fires when the panel EXISTS (VW/Audi pages have no such
+        accordion — their code is in the always-expanded "Vehicle data"
+        panel), so every currently-verified estate is untouched;
+      - only called after the normal extraction found no code, so a
+        successful lookup never pays the click or the mount;
+      - every failure is swallowed and reported as False. A page that
+        will not expand must degrade to the existing no-code outcome,
+        never to an exception.
+
+    Returns True if the panel was clicked open, False otherwise."""
+    try:
+        panel = page.locator('[data-test-id="vinfoEquipment"]').first
+        if panel.count() == 0:
+            return False
+        btn = panel.locator("button").first
+        if btn.get_attribute("aria-expanded") == "true":
+            return False          # already open; nothing to do
+        btn.click(timeout=3_000)
+        # The accordion animates (measured ~1.3-1.7s transition-duration on
+        # the two real pages). Wait for a row to actually mount rather than
+        # sleeping a guessed interval.
+        panel.locator('[data-test-id="row"]').first.wait_for(
+            state="attached", timeout=5_000)
+        return True
+    except Exception:
+        return False
+
+
 def _handle_model_picker(page: Page) -> bool:
     """Some VINs (notably older Mercedes) don't resolve to a single vehicle:
     partslink24 shows a "Please select:" dropdown of sales-type variants
@@ -2060,6 +2125,65 @@ def _extract_hyundai_kia_colour(text: str) -> tuple[str, str]:
     return code, val
 
 
+RENAULT_BODY_COLOUR_RE = re.compile(
+    r"(?m)^[ \t]*([A-Z0-9]{2,8})[ \t]*-[ \t]*BODY COLOURS?[ \t]*$")
+
+
+def _extract_renault_body_colour(text: str) -> tuple[str, str]:
+    """Renault/Dacia: the paint code is NOT in the "Vehicle data" panel at
+    all — it lives in the separate "Equipment" accordion, in a two-column
+    Equipment/Description table, as a row whose LEFT cell is
+    "<CODE> - BODY COLOUR" and whose RIGHT cell is the colour name:
+
+        OV369 - BODY COLOUR          ICE WHITE BC        (Clio V)
+        OVDQH - BODY COLOUR          GREEN LICHEN GREY   (Dacia Spring)
+
+    inner_text renders those two cells as consecutive lines, so the code
+    is on the matched line and the name is on the next one.
+
+    WHOLE-LINE ANCHORING IS LOAD-BEARING, not tidiness. The same table
+    carries rows whose VALUE cell contains the phrase "BODY COLOUR":
+
+        PGPRT2 - OUTSIDE DOOR HANDLE TYPE   DOOR HANDLE BODY COLOUR
+        RENTC  - COLOR OF OUTSIDE MIRROR    NON-BODY COLOURED EXTERIO
+
+    An unanchored search for the phrase captures "DOOR" and "NON" from
+    those two (measured, both real pages, 2026-08-14). The pages also
+    carry 108 (Dacia) and 160 (Clio) OTHER lines of the generic
+    "CODE - LABEL" shape, so the literal label is the only safe anchor.
+
+    WHY THIS BYPASSES _is_valid_code's DIGIT RULE — read that function's
+    revisit block first. It drops 4+-letter digit-free codes (TEKPN,
+    TERQH, PSTDD) and declined to relax, correctly, because no safe
+    discriminator existed for a bare captured token. This site is not a
+    bare token: the code arrives from a LABELLED POSITION, whole-line,
+    left cell, label literally "BODY COLOUR". The label is what proves
+    it is a code and not a colour word, so the shape heuristic is not
+    needed here and would do only harm. OVDQH is dealer-confirmed
+    (Renault Dialogys, 2026-08-14) and IS dropped by the digit rule —
+    the tripwire in that block fired for real on this exact car. Every
+    OTHER extractor and pattern keeps the digit rule unchanged; this is
+    a trusted-context exemption, NOT a relaxation.
+
+    Returns ("", "") on every non-Renault/Dacia page (the label does not
+    occur), so this is a no-op elsewhere."""
+    for m in RENAULT_BODY_COLOUR_RE.finditer(text):
+        if _match_is_interior(text, m.start()):
+            continue
+        code = m.group(1)
+        # Colour name = the next non-empty line, but ONLY if it is not
+        # itself another "CODE - LABEL" row (i.e. the description cell was
+        # empty and we have run into the following row). Verbatim: the
+        # "BC" in "ICE WHITE BC" is the manufacturer's own string.
+        desc = ""
+        tail = text[m.end():].lstrip("\n")
+        nxt = tail.split("\n", 1)[0].strip() if tail else ""
+        if nxt and not RENAULT_BODY_COLOUR_RE.match(nxt) and " - " not in nxt:
+            desc = nxt
+        return code, desc
+    return "", ""
+
+
 def extract_paint_code(text: str) -> str:
     """Try each pattern in order; return the first match that survives
     validation. Patterns are ordered most-specific-first, so the natural
@@ -2083,6 +2207,14 @@ def extract_paint_code(text: str) -> str:
     # code before the body code, so the generic patterns would grab the
     # frame. The helper picks the body-panel code (and is a no-op on every
     # non-smart page, anchored on the word "tridion").
+    # Renault/Dacia "<CODE> - BODY COLOUR" equipment row FIRST: it is the
+    # most specific anchor on any page we handle (a literal label on a
+    # whole line), it occurs on no other brand, and it deliberately does
+    # NOT go through _is_valid_code — see the helper for why that is a
+    # trusted-context exemption and not a relaxation of the digit rule.
+    rd_code, _ = _extract_renault_body_colour(text)
+    if rd_code:
+        return _normalise_code(rd_code.upper())
     smart_code, _ = _extract_smart_colour(text)
     if smart_code and _is_valid_code(smart_code):
         return _normalise_code(smart_code.upper())
@@ -2430,6 +2562,12 @@ def extract_paint_description(text: str) -> str:
     # yields \n), so it costs nothing and closes the whole family.
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     # smart two-part "Paint Code" — pick the body-panel colour word.
+    # Renault/Dacia equipment row: the colour name sits in the adjacent
+    # cell, so it comes back even when the dataset has no row for the code
+    # (OVDQH resolves to nothing in paint_lookup.json as of 2026-08-14).
+    _, rd_desc = _extract_renault_body_colour(text)
+    if rd_desc:
+        return _titlecase_colour(rd_desc)
     _, smart_desc = _extract_smart_colour(text)
     if smart_desc:
         return _titlecase_colour(smart_desc)
@@ -2658,6 +2796,16 @@ def _process_result_page(page: Page, vin: str, result: LookupResult,
         return False, f"{error_prefix}{err}"
 
     _populate_from_text(result, text)
+    if not result.paint_code:
+        # Renault/Dacia last chance: the code may be behind the collapsed
+        # "Equipment" accordion. Costs one click and one re-collect, and
+        # ONLY on a page that has the panel and has already failed — so
+        # no successful lookup and no other brand pays for it.
+        if _expand_equipment_panel(page):
+            text = collect_all_text(page)
+            _populate_from_text(result, text)
+            if result.paint_code:
+                log("paint code recovered from the Equipment panel")
     if not result.paint_code:
         dump()
         return False, f"{error_prefix}{no_paint_msg}"
