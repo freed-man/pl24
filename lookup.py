@@ -2001,6 +2001,7 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
     text = ""
     picker_handled = False
     candidates_handled = False
+    equipment_expanded = False
     while time.monotonic() < deadline:
         text = collect_all_text(page)
         lower = text.lower()
@@ -2056,6 +2057,38 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
         # loop.
         if not candidates_handled and _handle_catalog_candidates(page):
             candidates_handled = True
+            page.wait_for_timeout(interval)
+            continue
+        # Renault/Dacia: their BODY COLOUR row lives inside a COLLAPSED
+        # "Equipment" accordion, and MUI leaves a collapsed accordion's
+        # children UNMOUNTED — so the row is absent from the DOM, not
+        # merely hidden. VEHICLE_DATA_NEEDLE already contains
+        # BODY\s*COLOU?R and would match it happily; it never gets the
+        # chance, so the loop cannot recognise a fully-rendered Renault
+        # page and ALWAYS runs to the deadline. Same pathology the PSA
+        # note above describes, on a different estate: verified 2026-08-14
+        # against the real collapsed dump, where of every stop signal only
+        # the post-deadline PAGE_LOADED_NEEDLE fallback matched.
+        #
+        # The fix is to MOUNT the row, not to invent a new stop signal.
+        # Opening the panel here lets the EXISTING, already-trusted needle
+        # fire on the next poll. That matters: any Renault-specific early
+        # stop would have rested on an assumption about partial-render
+        # ordering that we have no partially-rendered page to check,
+        # whereas this rests on nothing new. Like the PSA expression this
+        # is a WHEN-to-stop mechanism only — it mounts content the page
+        # already owns and can never influence WHAT is returned.
+        #
+        # Gated three ways so no other estate pays for it: behind a
+        # one-shot flag; behind PAGE_LOADED_NEEDLE, so we only click a
+        # page that has actually rendered; and positioned after every
+        # cheap text check, because it is a locator call. Every currently
+        # verified estate matches a needle above on its first iteration
+        # and returns without ever reaching this line.
+        if (not equipment_expanded
+                and PAGE_LOADED_NEEDLE.search(text)
+                and _expand_equipment_panel(page)):
+            equipment_expanded = True
             page.wait_for_timeout(interval)
             continue
         page.wait_for_timeout(interval)
@@ -2797,10 +2830,13 @@ def _process_result_page(page: Page, vin: str, result: LookupResult,
 
     _populate_from_text(result, text)
     if not result.paint_code:
-        # Renault/Dacia last chance: the code may be behind the collapsed
-        # "Equipment" accordion. Costs one click and one re-collect, and
-        # ONLY on a page that has the panel and has already failed — so
-        # no successful lookup and no other brand pays for it.
+        # BACKSTOP. wait_for_vehicle_data now opens this panel itself, so
+        # the normal Renault/Dacia path never reaches here. This survives
+        # for the one case the loop cannot cover: the panel was expanded
+        # on the final poll and the deadline expired before the next
+        # collect, leaving pre-expand text. Costs one click and one
+        # re-collect, only on a page that has the panel and has already
+        # failed — no successful lookup and no other brand pays for it.
         if _expand_equipment_panel(page):
             text = collect_all_text(page)
             _populate_from_text(result, text)
