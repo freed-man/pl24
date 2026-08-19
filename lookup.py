@@ -2798,10 +2798,11 @@ def _process_result_page(page: Page, vin: str, result: LookupResult,
     only re-runs on a thrown exception, never on this clean None return).
 
     Returns (True, None) on success or (False, reason) on failure."""
-    def dump():
-        # Failure-path dumps: --debug OR --dump both write here.
+    def dump(text: str | None = None):
+        # Failure-path dumps: --debug OR --dump both write here. `text` is
+        # the exact string handed to the extractors — see dump_debug.
         if debug or DUMP_ALWAYS:
-            dump_debug(page, vin + debug_suffix)
+            dump_debug(page, vin + debug_suffix, text)
 
     text = wait_for_vehicle_data(page, timeout_ms=10_000)
 
@@ -2825,7 +2826,7 @@ def _process_result_page(page: Page, vin: str, result: LookupResult,
 
     err = vin_error_in_text(text)
     if err:
-        dump()
+        dump(text)
         return False, f"{error_prefix}{err}"
 
     _populate_from_text(result, text)
@@ -2843,13 +2844,13 @@ def _process_result_page(page: Page, vin: str, result: LookupResult,
             if result.paint_code:
                 log("paint code recovered from the Equipment panel")
     if not result.paint_code:
-        dump()
+        dump(text)
         return False, f"{error_prefix}{no_paint_msg}"
     # Success path: dump ONLY under --dump. Plain --debug must stay
     # failure-only (its long-standing contract), so we deliberately do not
     # call dump() here — we check DUMP_ALWAYS directly.
     if DUMP_ALWAYS:
-        dump_debug(page, vin + debug_suffix)
+        dump_debug(page, vin + debug_suffix, text)
     return True, None
 
 
@@ -3220,7 +3221,7 @@ def lookup_vin_with_retry(page: Page, row: LookupRow, debug: bool,
     return r
 
 
-def dump_debug(page: Page, vin: str) -> None:
+def dump_debug(page: Page, vin: str, text: str | None = None) -> None:
     DEBUG_DIR.mkdir(exist_ok=True)
     base = DEBUG_DIR / vin
     try:
@@ -3233,23 +3234,30 @@ def dump_debug(page: Page, vin: str) -> None:
         )
     except Exception:
         pass
-    # The EXACT text the extractors see. page.content() serialises the DOM;
-    # collect_all_text() returns RENDERED text, walking every frame and
-    # picking up anything the serialiser cannot reach — shadow DOM being
-    # the case that matters, since a web component's shadow root appears
-    # in inner_text and never in content(). Without this file the saved
-    # artifact is not the artifact the extractor used, which makes dumps
-    # actively misleading on exactly the pages hardest to diagnose.
-    # Added 2026-08-15 after Vauxhall VXKUSHPW7SW021171 returned the
-    # description "Paintwork", a string that occurs ZERO times in the
-    # captured .html — two sessions were spent reasoning about a page
-    # whose evidence was never in the file.
-    try:
-        base.with_suffix(".txt").write_text(
-            _redact_page_html(collect_all_text(page)), encoding="utf-8"
-        )
-    except Exception:
-        pass
+    # <vin>.txt — the EXACT text the extractors were given, passed in by
+    # the caller. It is NOT re-collected here, and that distinction is the
+    # whole point of this file.
+    #
+    # Proven on Vauxhall VXKUSHPW7SW021171 (Opel catalogue), 2026-08-15:
+    # the lookup returned the description "Paintwork", a string that
+    # occurs ZERO times in BOTH the captured .html AND a freshly collected
+    # inner_text taken moments later. The catalogue is an SPA whose DOM
+    # changes between the wait loop returning and dump_debug running, so a
+    # dump that re-collects captures a DIFFERENT page than the one that
+    # was parsed. Two sessions were spent reasoning about artifacts that
+    # could not contain the evidence, and a first attempt at this file
+    # re-collected the text and reproduced the very bug it was meant to
+    # expose.
+    #
+    # If text is None the caller had none to give (an early failure before
+    # any collect); no file is written rather than a misleading one.
+    if text is not None:
+        try:
+            base.with_suffix(".txt").write_text(
+                _redact_page_html(text), encoding="utf-8"
+            )
+        except Exception:
+            pass
     for i, fr in enumerate(page.frames):
         # frames[0] IS the main frame, so its content duplicates the
         # <vin>.html written above byte for byte. Skip it; keep every child
