@@ -2554,7 +2554,25 @@ def _extract_psa_body_colour(text: str) -> str:
 
     Returns "" if there's no BODY COLOUR field or it cleans to nothing.
     """
-    m = re.search(r"(?:^|\n)\s*BODY\s*COLOU?R\s*[:\n\t ]+\s*([^\n]+)",
+    # The separator after the label may be a colon, a TAB (column layout)
+    # or a NEWLINE (label above value) — but NEVER a bare space, because a
+    # bare space means "BODY COLOUR" is the start of running text rather
+    # than a field label.
+    #
+    # Found 2026-08-15, Vauxhall/Opel VXKUSHPW7SW021171. Its equipment
+    # panel carries the row  BONNET COLOUR / BODY COLOUR PAINTWORK  — the
+    # bonnet is painted in body colour. The old separator class allowed a
+    # space, so this matched the VALUE line of an unrelated field and
+    # returned "Paintwork" as the exterior colour name: a PSA extractor
+    # firing on an Opel page, i.e. cross-estate contamination, not a
+    # wrapper word. It reached a customer as a name_only result.
+    #
+    # Real PSA pages put the label on its own line — verified same day on
+    # Citroën C3 VF7SXHMRVMT643784:
+    #     BODY COLOUR
+    #     KTV - BLACK PEARL PAINT
+    # and the Mercedes body row is tab-separated, so both survive.
+    m = re.search(r"(?:^|\n)[ \t]*BODY[ \t]*COLOU?R[ \t]*(?::|[\t\n])\s*([^\n]+)",
                   text, re.I)
     if not m:
         return ""
@@ -3338,7 +3356,12 @@ def _clear_stale_debug_dumps() -> None:
         for f in DEBUG_DIR.iterdir():
             if f.name in keep:
                 continue
-            if f.is_file() and f.suffix.lower() in (".html", ".png"):
+            # .txt added 2026-08-15 with the rendered-text dump. Omitting
+            # it here left stale .txt files from a PREVIOUS vin sitting in
+            # _debug/ beside the current run's .html — precisely the
+            # "artifact that looks current but isn't" trap this whole
+            # episode was about.
+            if f.is_file() and f.suffix.lower() in (".html", ".png", ".txt"):
                 try:
                     f.unlink()
                     cleared += 1
