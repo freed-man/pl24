@@ -1594,6 +1594,13 @@ PAINT_DESCRIPTION_PATTERNS = [
     re.compile(
         r"Paint\s*Exterior\s*Body\s*Colou?r\s*\n\s*"
         r"(?!.+?-[A-Z]{2,}\d{2,}\b)"
+        # (?!Interior\b) — the \s*\n\s* separator will cross a BLANK value
+        # cell, so with an empty "Paint Exterior Body Colour" row this
+        # captured the NEXT row's label. Same class as the Primastar
+        # "Interior Color" leak of 2026-08-15; see _value_is_field_label.
+        # Pattern [6] has carried this guard since 2026-08-08 — it was
+        # simply never mirrored to the other value-side sites.
+        r"(?!Interior\b)"
         r"(?:Exterior\s*Paint\s*-\s*)?"
         r"([^\n]+?)\s*$",
         re.I | re.M,
@@ -2101,6 +2108,37 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
     return None
 
 
+_VALUE_IS_FIELD_LABEL_RE = re.compile(r"^\s*Interior\b", re.I)
+
+
+def _value_is_field_label(value: str) -> bool:
+    """True if a captured colour VALUE is really the NEXT FIELD'S LABEL.
+
+    partslink24 renders an empty cell as label + separator + nothing, so a
+    value-side regex that tolerates a line break can walk past the blank
+    and capture the following row's label. Twice now:
+
+      2026-08-08  POSITION side — "Interior Paint Code\\n851 (BLACK -
+                  leather)" returned "Black" as the exterior name. Fixed
+                  with _match_is_interior at every match site.
+      2026-08-15  VALUE side — Nissan Primastar VSKF4B1B6UY637656 (legacy
+                  frame UI) has BOTH colour cells empty:
+                      Exterior color\\t
+                      Interior color\\t
+                  and the Hyundai/Kia extractor returned the description
+                  "Interior Color". It reached a customer.
+
+    _match_is_interior guards WHERE the label was found; this guards WHAT
+    was captured. Different failures, both needed: on the Primastar the
+    label position is a perfectly legitimate "Exterior color" row.
+
+    Deliberately narrow — "Interior" only, not a growing blacklist of junk
+    words. A blacklist would quietly swallow real colour names, and the
+    right fix for each new leak is an anchor that cannot cross a blank
+    cell, not another banned word."""
+    return bool(_VALUE_IS_FIELD_LABEL_RE.match(value))
+
+
 def _extract_hyundai_kia_colour(text: str) -> tuple[str, str]:
     """(code, description) from a Hyundai/Kia "Exterior color" row, or
     ("","") if the field isn't a Hyundai/Kia-style name.
@@ -2130,8 +2168,18 @@ def _extract_hyundai_kia_colour(text: str) -> tuple[str, str]:
     would also wrongly grab the 2-char "JD"/"CD" prefixes off the messy Kia
     values as if they were paint codes.
     """
-    m = re.search(r"Exterior\s*colou?r[ \t]*[\t\n][ \t]*([^\n\t]+)",
-                  text, re.I)
+    # (?![ \t]*\t[ \t]*\n) — refuse to match when the cell is EMPTY.
+    # Without it the leading [ \t]* swallowed the tab, [\t\n] then matched
+    # the NEWLINE, and the capture jumped to the next line: on Nissan
+    # Primastar VSKF4B1B6UY637656, "Exterior color\\t\\nInterior color\\t"
+    # yielded the description "Interior Color" (2026-08-15). An absent
+    # value must yield nothing, never the next field's label. Both real
+    # Hyundai/Kia separators still work — tab and newline — because the
+    # lookahead requires a TAB followed by the line break, which is
+    # exactly what an empty cell looks like and what a real value is not.
+    m = re.search(
+        r"Exterior\s*colou?r(?![ \t]*\t[ \t]*\n)[ \t]*[\t\n][ \t]*([^\n\t]+)",
+        text, re.I)
     if not m:
         return "", ""
     # Interior guard (see _match_is_interior). These pre-pattern
@@ -2152,6 +2200,8 @@ def _extract_hyundai_kia_colour(text: str) -> tuple[str, str]:
     # its own pattern. Hyundai/Kia names never lead with "<3 digits> ".
     if re.match(r"\d{3}\s", val):
         return "", ""
+    if _value_is_field_label(val):
+        return "", ""          # captured the next row's label, not a colour
     is_name = (" " in val) or (len(val) >= 4 and val.replace(" ", "").isalpha())
     if not is_name:
         return "", ""
@@ -2584,6 +2634,8 @@ def _extract_psa_body_colour(text: str) -> str:
     if _match_is_interior(text, m.start()):
         return ""
     v = m.group(1).strip()
+    if _value_is_field_label(v):
+        return ""              # next row's label, not a colour
     # Volvo's equipment tab has a "BODY COLOR   626 POWDER BLUE" line whose
     # value LEADS with a 3-digit code. PSA values never do, so reject that
     # shape here — it belongs to Volvo's own (separated) pattern, and
