@@ -1526,8 +1526,15 @@ PAINT_CODE_PATTERNS = [
         r"([A-Z0-9]{2,6})"            # primary code
         r"(?:/[A-Z0-9]{2,6})?"        # optional second code (two-tone)
         r"\s*-\s*"
-        r".+?"                        # the name (consumed but not captured here)
-        r"\s+PAINT\b",
+        # PAINT may sit ANYWHERE in the value, not only after the name.
+        # Peugeot 107 VF3PMCFAC88032337 renders "KTA - PAINT DARK GREY
+        # MICA 1E0" — PAINT immediately after the dash — so the old
+        # ".+?\s+PAINT\b" found no second occurrence and the whole match
+        # failed, silently dropping a real code (KTA, confirmed
+        # 2026-08-15) while the Citroën C3's "KTV - BLACK PEARL PAINT"
+        # matched fine. A lookahead keeps PAINT as the required signal
+        # that this is a paint row without fixing the word order.
+        r"(?=[^\n]*\bPAINT\b)",
         re.I,
     ),
     re.compile(
@@ -2646,6 +2653,20 @@ def _extract_psa_body_colour(text: str) -> str:
     v = re.sub(r"\bPAINT\b", " ", v, flags=re.I)
     v = v.replace("+", " + ")
     v = re.sub(r"\s+", " ", v).strip()
+    # Drop a trailing CROSS-REFERENCE code. Peugeot 107 VF3PMCFAC88032337
+    # renders "KTA - PAINT DARK GREY MICA 1E0": KTA is the paint code
+    # (confirmed 2026-08-15) and 1E0 is the Toyota-format code the
+    # TPCA-built 107/Aygo/C1 also carry. Only the pre-dash token is the
+    # code, so the trailing one is not part of the NAME — it was reaching
+    # customers as "Dark Grey Mica 1E0".
+    #
+    # Narrow on purpose: last token only, 2-5 chars, and it must contain
+    # BOTH a digit and a letter so it is code-shaped rather than a word.
+    # A name ending in a bare number ("GREY 2") has no letter and is kept;
+    # a name ending in a word has no digit and is kept. Applied AFTER the
+    # whitespace collapse so the token is cleanly delimited.
+    v = re.sub(r"\s+(?=[A-Z0-9]{2,5}$)(?=[A-Z0-9]*[0-9])(?=[A-Z0-9]*[A-Z])"
+               r"[A-Z0-9]{2,5}$", "", v)
     return _titlecase_colour(v)
 
 
