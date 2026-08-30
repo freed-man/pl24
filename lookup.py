@@ -1504,9 +1504,18 @@ PAINT_CODE_PATTERNS = [
     # code paren (codes contain a digit or are <=3 chars) — lets the capture
     # reach the actual code paren. Single-paren "STERLINGGRAU (472)" is
     # unaffected (the optional group simply doesn't match).
+    # The name run also allows "." and "," — BMW abbreviates heavily
+    # ("LAURUSGRAU MET. M.AKZENT BMW I BLAU (B79)" on i3
+    # WBY1Z42080V247542, "SCHWARZ MET. (475)"). Without the dot the run
+    # stopped before the code paren and the whole match failed, so EVERY
+    # BMW colour carrying an abbreviation dot returned nothing at all —
+    # a silent miss, not a wrong answer, found 2026-08-15. The same
+    # omission blanked VEHICLE_DATA_NEEDLE on those pages, so they also
+    # ran the wait loop to its full deadline. Dots and commas cannot
+    # swallow a code paren: the run still stops at "(".
     re.compile(
         r"(?:Exterior\s*)?(?:Colou?r|Farbe)\s*[:\n]\s*"
-        r"[A-Z0-9][A-Z0-9 \-/]*?"
+        r"[A-Z0-9][A-Z0-9 .,\-/]*?"
         r"(?:\s*\([A-Z ]+\))?"
         r"\s*\(\s*([A-Z0-9]{2,8})\s*\)",
         re.I,
@@ -1565,7 +1574,7 @@ PAINT_DESCRIPTION_PATTERNS = [
     # inline ("SNAPPER ROCKS BLUE METALLIC (C1G)") is likewise unaffected.
     re.compile(
         r"(?:Exterior\s*)?(?:Colou?r|Farbe)\s*[:\n]\s*"
-        r"([A-Z0-9][A-Z0-9 \-/]*?(?:\s*\([A-Z ]+\))?)"  # name + optional (FINISH)
+        r"([A-Z0-9][A-Z0-9 .,\-/]*?(?:\s*\([A-Z ]+\))?)"  # name + optional (FINISH)
         r"\s*\(\s*[A-Z0-9]{2,8}\s*\)",                    # then the (code) paren
         re.I,
     ),
@@ -1715,7 +1724,7 @@ VEHICLE_DATA_NEEDLE = re.compile(
     # tripping on the Equipment-tab "Exterior Paint Pack" row (space +
     # word, no boundary) before the Vehicle-data tab has rendered.
     r"Exterior\s*Paint[ \t]*[\t\n]|"
-    r"(?:Colou?r|Farbe)\s*\n\s*[A-Z0-9][A-Z0-9 \-/]*\(\s*[A-Z0-9]{2,8}\s*\)",
+    r"(?:Colou?r|Farbe)\s*\n\s*[A-Z0-9][A-Z0-9 .,\-/]*\(\s*[A-Z0-9]{2,8}\s*\)",
     re.I,
 )
 
