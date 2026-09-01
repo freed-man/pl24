@@ -1895,6 +1895,25 @@ def _handle_catalog_candidates(page: Page) -> bool:
         return False
 
 
+# partslink24 RENAMED this attribute in the catalogue app: the 2026-07-14
+# build served data-test-id, the 2026-07-31 build serves data-testid (no
+# hyphen). Measured across four real dumps 2026-08-16 — the newer pages
+# carry ZERO occurrences of the hyphenated form, so a single-spelling
+# selector goes blind and _expand_equipment_panel silently returns False.
+# Symptom: Dacia Sandero III UU1DJF00671679079 returned
+# paint_data_missing and burned the full 10s deadline, while the Spring
+# (captured under the older build) worked.
+#
+# BOTH spellings are matched, deliberately, and neither is "the old one".
+# We do not control which build a request lands on — caches, staged
+# rollouts and rollbacks all mean the older markup can reappear, and the
+# login app (pl24-login-ui) still used the hyphenated form on the same
+# day, verified by its selectors continuing to work.
+EQUIPMENT_PANEL_SEL = ('[data-test-id="vinfoEquipment"], '
+                       '[data-testid="vinfoEquipment"]')
+EQUIPMENT_ROW_SEL = '[data-test-id="row"], [data-testid="row"]'
+
+
 def _expand_equipment_panel(page: Page) -> bool:
     """Renault/Dacia hide the paint code behind a COLLAPSED "Equipment"
     accordion. MUI unmounts a collapsed accordion's children, so the rows
@@ -1916,7 +1935,7 @@ def _expand_equipment_panel(page: Page) -> bool:
 
     Returns True if the panel was clicked open, False otherwise."""
     try:
-        panel = page.locator('[data-test-id="vinfoEquipment"]').first
+        panel = page.locator(EQUIPMENT_PANEL_SEL).first
         if panel.count() == 0:
             return False
         btn = panel.locator("button").first
@@ -1926,7 +1945,7 @@ def _expand_equipment_panel(page: Page) -> bool:
         # The accordion animates (measured ~1.3-1.7s transition-duration on
         # the two real pages). Wait for a row to actually mount rather than
         # sleeping a guessed interval.
-        panel.locator('[data-test-id="row"]').first.wait_for(
+        panel.locator(EQUIPMENT_ROW_SEL).first.wait_for(
             state="attached", timeout=5_000)
         return True
     except Exception:
