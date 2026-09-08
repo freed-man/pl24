@@ -1139,6 +1139,17 @@ def _dump_login_failure(page: Page) -> None:
         pass
 
 
+# DATES IN THESE COMMENTS. A bare "2026-08" means the day was not
+# recorded — those entries were written with a guessed day and reduced to
+# month precision once that was noticed, rather than replaced with a
+# second guess. Full dates are ones that were actually known at the time
+# of writing. Going forward: stamp the real current date, and if it isn't
+# known, write the month. Never infer a date from surrounding entries —
+# this file's comments are used as evidence about the ORDER of events
+# (e.g. that the Renault/Dacia equipment work predates the 2026-07-31
+# catalogue build), and a fabricated day silently corrupts that.
+
+
 # ---------- catalog navigation ----------------------------------------------
 
 def open_catalog(page: Page, brand: str) -> "Page | None":
@@ -1390,7 +1401,7 @@ PSA_BCODE_COLOUR_RE = re.compile(
 #                           (EVL, EWP, NEU, KCA) are absent from the
 #                           page. Correctly returns nothing.
 #
-#     Renault/  2026-08-14  Clio V VF1RJA00773682232 -> OV369 "ICE
+#     Renault/  2026-08  Clio V VF1RJA00773682232 -> OV369 "ICE
 #     Dacia                   WHITE BC"; Dacia Spring UU1DBG005RU197157
 #                             -> OVDQH "GREEN LICHEN GREY". Both codes
 #                             AND names confirmed verbatim in Renault
@@ -1589,7 +1600,7 @@ PAINT_CODE_PATTERNS = [
     # WBY1Z42080V247542, "SCHWARZ MET. (475)"). Without the dot the run
     # stopped before the code paren and the whole match failed, so EVERY
     # BMW colour carrying an abbreviation dot returned nothing at all —
-    # a silent miss, not a wrong answer, found 2026-08-15. The same
+    # a silent miss, not a wrong answer, found 2026-08. The same
     # omission blanked VEHICLE_DATA_NEEDLE on those pages, so they also
     # ran the wait loop to its full deadline. Dots and commas cannot
     # swallow a code paren: the run still stops at "(".
@@ -1626,7 +1637,7 @@ PAINT_CODE_PATTERNS = [
         # MICA 1E0" — PAINT immediately after the dash — so the old
         # ".+?\s+PAINT\b" found no second occurrence and the whole match
         # failed, silently dropping a real code (KTA, confirmed
-        # 2026-08-15) while the Citroën C3's "KTV - BLACK PEARL PAINT"
+        # 2026-08) while the Citroën C3's "KTV - BLACK PEARL PAINT"
         # matched fine. A lookahead keeps PAINT as the required signal
         # that this is a paint row without fixing the word order.
         r"(?=[^\n]*\bPAINT\b)",
@@ -1699,7 +1710,7 @@ PAINT_DESCRIPTION_PATTERNS = [
         # (?!Interior\b) — the [ \t]*\n(?>\s*) separator will cross a BLANK value
         # cell, so with an empty "Paint Exterior Body Colour" row this
         # captured the NEXT row's label. Same class as the Primastar
-        # "Interior Color" leak of 2026-08-15; see _value_is_field_label.
+        # "Interior Color" leak of 2026-08; see _value_is_field_label.
         # Pattern [6] has carried this guard since 2026-08-08 — it was
         # simply never mirrored to the other value-side sites.
         r"(?!Interior\b)"
@@ -1992,7 +2003,7 @@ def _handle_catalog_candidates(page: Page) -> bool:
 
 # partslink24 RENAMED this attribute in the catalogue app: the 2026-07-14
 # build served data-test-id, the 2026-07-31 build serves data-testid (no
-# hyphen). Measured across four real dumps 2026-08-16 — the newer pages
+# hyphen). Measured across four real dumps 2026-08 — the newer pages
 # carry ZERO occurrences of the hyphenated form, so a single-spelling
 # selector goes blind and _expand_equipment_panel silently returns False.
 # Symptom: Dacia Sandero III UU1DJF00671679079 returned
@@ -2014,7 +2025,7 @@ def _expand_equipment_panel(page: Page) -> bool:
     accordion. MUI unmounts a collapsed accordion's children, so the rows
     are not merely hidden — they are absent from the DOM, and inner_text
     cannot see them at any timeout. No regex change can reach them; the
-    panel has to be opened. Confirmed on two real dumps (2026-08-14):
+    panel has to be opened. Confirmed on two real dumps (2026-08):
     collapsed, the element is a bare <h3> with aria-expanded="false" and
     no MuiCollapse sibling at all.
 
@@ -2203,7 +2214,7 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
         # BODY\s*COLOU?R and would match it happily; it never gets the
         # chance, so the loop cannot recognise a fully-rendered Renault
         # page and ALWAYS runs to the deadline. Same pathology the PSA
-        # note above describes, on a different estate: verified 2026-08-14
+        # note above describes, on a different estate: verified 2026-08
         # against the real collapsed dump, where of every stop signal only
         # the post-deadline PAGE_LOADED_NEEDLE fallback matched.
         #
@@ -2251,7 +2262,7 @@ def _value_is_field_label(value: str) -> bool:
       2026-08-08  POSITION side — "Interior Paint Code\\n851 (BLACK -
                   leather)" returned "Black" as the exterior name. Fixed
                   with _match_is_interior at every match site.
-      2026-08-15  VALUE side — Nissan Primastar VSKF4B1B6UY637656 (legacy
+      2026-08  VALUE side — Nissan Primastar VSKF4B1B6UY637656 (legacy
                   frame UI) has BOTH colour cells empty:
                       Exterior color\\t
                       Interior color\\t
@@ -2302,7 +2313,7 @@ def _extract_hyundai_kia_colour(text: str) -> tuple[str, str]:
     # Without it the leading [ \t]* swallowed the tab, [\t\n] then matched
     # the NEWLINE, and the capture jumped to the next line: on Nissan
     # Primastar VSKF4B1B6UY637656, "Exterior color\\t\\nInterior color\\t"
-    # yielded the description "Interior Color" (2026-08-15). An absent
+    # yielded the description "Interior Color" (2026-08). An absent
     # value must yield nothing, never the next field's label. Both real
     # Hyundai/Kia separators still work — tab and newline — because the
     # lookahead requires a TAB followed by the line break, which is
@@ -2373,7 +2384,7 @@ def _extract_renault_body_colour(text: str) -> tuple[str, str]:
         RENTC  - COLOR OF OUTSIDE MIRROR    NON-BODY COLOURED EXTERIO
 
     An unanchored search for the phrase captures "DOOR" and "NON" from
-    those two (measured, both real pages, 2026-08-14). The pages also
+    those two (measured, both real pages, 2026-08). The pages also
     carry 108 (Dacia) and 160 (Clio) OTHER lines of the generic
     "CODE - LABEL" shape, so the literal label is the only safe anchor.
 
@@ -2385,7 +2396,7 @@ def _extract_renault_body_colour(text: str) -> tuple[str, str]:
     left cell, label literally "BODY COLOUR". The label is what proves
     it is a code and not a colour word, so the shape heuristic is not
     needed here and would do only harm. OVDQH is dealer-confirmed
-    (Renault Dialogys, 2026-08-14) and IS dropped by the digit rule —
+    (Renault Dialogys, 2026-08) and IS dropped by the digit rule —
     the tripwire in that block fired for real on this exact car. Every
     OTHER extractor and pattern keeps the digit rule unchanged; this is
     a trusted-context exemption, NOT a relaxation.
@@ -2759,7 +2770,7 @@ def _extract_psa_body_colour(text: str) -> str:
     # bare space means "BODY COLOUR" is the start of running text rather
     # than a field label.
     #
-    # Found 2026-08-15, Vauxhall/Opel VXKUSHPW7SW021171. Its equipment
+    # Found 2026-08, Vauxhall/Opel VXKUSHPW7SW021171. Its equipment
     # panel carries the row  BONNET COLOUR / BODY COLOUR PAINTWORK  — the
     # bonnet is painted in body colour. The old separator class allowed a
     # space, so this matched the VALUE line of an unrelated field and
@@ -2798,7 +2809,7 @@ def _extract_psa_body_colour(text: str) -> str:
     v = re.sub(r"\s+", " ", v).strip()
     # Drop a trailing CROSS-REFERENCE code. Peugeot 107 VF3PMCFAC88032337
     # renders "KTA - PAINT DARK GREY MICA 1E0": KTA is the paint code
-    # (confirmed 2026-08-15) and 1E0 is the Toyota-format code the
+    # (confirmed 2026-08) and 1E0 is the Toyota-format code the
     # TPCA-built 107/Aygo/C1 also carry. Only the pre-dash token is the
     # code, so the trailing one is not part of the NAME — it was reaching
     # customers as "Dark Grey Mica 1E0".
@@ -2831,7 +2842,7 @@ def extract_paint_description(text: str) -> str:
     # smart two-part "Paint Code" — pick the body-panel colour word.
     # Renault/Dacia equipment row: the colour name sits in the adjacent
     # cell, so it comes back even when the dataset has no row for the code
-    # (OVDQH resolves to nothing in paint_lookup.json as of 2026-08-14).
+    # (OVDQH resolves to nothing in paint_lookup.json as of 2026-08).
     _, rd_desc = _extract_renault_body_colour(text)
     if rd_desc:
         return _titlecase_colour(rd_desc)
@@ -3499,7 +3510,7 @@ def dump_debug(page: Page, vin: str, text: str | None = None) -> None:
     # the caller. It is NOT re-collected here, and that distinction is the
     # whole point of this file.
     #
-    # Proven on Vauxhall VXKUSHPW7SW021171 (Opel catalogue), 2026-08-15:
+    # Proven on Vauxhall VXKUSHPW7SW021171 (Opel catalogue), 2026-08:
     # the lookup returned the description "Paintwork", a string that
     # occurs ZERO times in BOTH the captured .html AND a freshly collected
     # inner_text taken moments later. The catalogue is an SPA whose DOM
@@ -3599,7 +3610,7 @@ def _clear_stale_debug_dumps() -> None:
         for f in DEBUG_DIR.iterdir():
             if f.name in keep:
                 continue
-            # .txt added 2026-08-15 with the rendered-text dump. Omitting
+            # .txt added 2026-08 with the rendered-text dump. Omitting
             # it here left stale .txt files from a PREVIOUS vin sitting in
             # _debug/ beside the current run's .html — precisely the
             # "artifact that looks current but isn't" trap this whole
