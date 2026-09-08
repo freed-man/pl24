@@ -102,10 +102,29 @@ CATALOG_URL_TEMPLATE = (
 # data-test-id and name= are the stable hooks; the element ids are React
 # useId() output and change per instance/render. Always use these SCOPED
 # to a single component instance — see _complete_login_from_current_page.
-LOGIN_FIELD_COMPANY = '[data-test-id="pl24-login-ui-loginForm-input-companyId"]'
-LOGIN_FIELD_USERNAME = '[data-test-id="pl24-login-ui-loginForm-input-username"]'
-LOGIN_FIELD_PASSWORD = '[data-test-id="pl24-login-ui-loginForm-input-password"]'
-LOGIN_BUTTON_SUBMIT = '[data-test-id="pl24-login-ui-loginForm-button-submitForm"]'
+#
+# BOTH test-id spellings, for the reason EQUIPMENT_PANEL_SEL gives: the
+# CATALOGUE app renamed data-test-id -> data-testid in its 2026-07-31
+# build, and the login app (pl24-login-ui) had NOT followed as of
+# 2026-09-08 — verified by these selectors still working that day. There
+# is no reason to expect the login app to hold out indefinitely, and the
+# blast radius here is worse than a missed paint code: every selector
+# below is on the critical path, so a rename means the service cannot log
+# in at all. It fails safe rather than misclicking (a locator that matches
+# nothing has count()==0, so the Cancel-instead-of-Confirm disaster of an
+# earlier revision cannot recur) but it is still a total outage. Matching
+# both spellings costs nothing and removes the dependency on a third
+# party's rollout schedule.
+def _both_testid(value: str) -> str:
+    """CSS matching an element carrying `value` under EITHER test-id
+    spelling. Comma = CSS selector-list, which Playwright accepts."""
+    return f'[data-test-id="{value}"], [data-testid="{value}"]'
+
+
+LOGIN_FIELD_COMPANY = _both_testid("pl24-login-ui-loginForm-input-companyId")
+LOGIN_FIELD_USERNAME = _both_testid("pl24-login-ui-loginForm-input-username")
+LOGIN_FIELD_PASSWORD = _both_testid("pl24-login-ui-loginForm-input-password")
+LOGIN_BUTTON_SUBMIT = _both_testid("pl24-login-ui-loginForm-button-submitForm")
 # Session cookie partslink24 itself tests for before redirecting to
 # /portal-ui. Authoritative signal for "are we logged in".
 SESSION_COOKIE = "PL24TOKEN"
@@ -652,7 +671,7 @@ def handle_session_squeeze_out(page: Page) -> bool:
     Returns True if a prompt was found and confirmed, False if none was
     present."""
     prompt = page.locator(
-        '[data-test-id="pl24-login-ui-sessionSqueezeOut-squeezeOut"]').first
+        _both_testid("pl24-login-ui-sessionSqueezeOut-squeezeOut")).first
     try:
         if not prompt.count() or not prompt.is_visible():
             return False
@@ -671,7 +690,7 @@ def handle_session_squeeze_out(page: Page) -> bool:
     # session force-logged-out ("For security reasons, you have been
     # automatically logged out"). Match the confirm button and nothing else.
     btn = page.locator(
-        '[data-test-id="pl24-login-ui-sessionSqueezeOut-button-confirm"]'
+        _both_testid("pl24-login-ui-sessionSqueezeOut-button-confirm")
     ).first
     try:
         if btn.count() and btn.is_visible():
@@ -1069,9 +1088,42 @@ _JWT_RE = re.compile(
 )
 
 
+# Credential redaction for dumps. React on this site DOES serialise input
+# values into the DOM — every captured page shows value="<the VIN>" in the
+# search box — and _dump_login_failure fires on ANY failed login, in the
+# service as well as the CLI, on a page whose form has just been filled by
+# fill(). Whether the login component's inputs are light DOM (serialised)
+# or shadow DOM (not) was not established; this makes the answer not
+# matter. The account password does not expire the way the 10-minute
+# component JWT does, so it is the worst thing that could land in a dump.
+#
+# Tag-scoped and linear: [^>]* cannot cross a tag boundary, so there is no
+# whitespace-run backtracking of the kind the 2026-09-08 audit removed
+# from the extraction patterns.
+_INPUT_TAG_RE = re.compile(r"<input\b[^>]*>", re.I)
+_CRED_INPUT_MARKER_RE = re.compile(
+    r'type\s*=\s*"password"'
+    r'|(?:name|id|data-test-?id)\s*=\s*"[^"]*'
+    r'(?:password|username|companyid)[^"]*"',
+    re.I,
+)
+_VALUE_ATTR_RE = re.compile(r'(\bvalue\s*=\s*")[^"]*(")', re.I)
+
+
+def _redact_credential_inputs(html: str) -> str:
+    def _one(m: "re.Match[str]") -> str:
+        tag = m.group(0)
+        if _CRED_INPUT_MARKER_RE.search(tag):
+            return _VALUE_ATTR_RE.sub(r"\1<redacted>\2", tag)
+        return tag
+    return _INPUT_TAG_RE.sub(_one, html)
+
+
 def _redact_page_html(html: str) -> str:
-    """Remove component bearer tokens from captured HTML."""
+    """Remove component bearer tokens AND account credentials from
+    captured HTML."""
     html = _TOKEN_ATTR_RE.sub(r"\1<redacted>\2", html)
+    html = _redact_credential_inputs(html)
     return _JWT_RE.sub("<redacted-jwt>", html)
 
 
@@ -1479,14 +1531,25 @@ PAINT_CODE_PATTERNS = [
     # followed by " / Paint Code". Anchored on "Exterior" so we don't
     # pick up "Interior color".
     re.compile(
-        r"Exterior\s*colou?r(?!\s*/)\s*[:\n\t ]+\s*([A-Z0-9]{2,8})\b",
+        # SEPARATOR — [\s:]+ is ONE class with ONE quantifier. It replaced
+        # "\s*[:\n\t ]+\s*": THREE quantifiers over OVERLAPPING classes
+        # (\s already contains space, tab and newline), so on a label
+        # followed by a long whitespace run with NO value the engine tried
+        # every way of partitioning that run between them. Measured CUBIC:
+        # 3ms at 100 tabs, 189ms at 400, 1.4s at 800, 72 SECONDS at 3000.
+        # A page with an empty colour cell beside a large blank table
+        # region reaches exactly that shape, and it would hold a pool slot
+        # long past the 10s deadline. Found by audit 2026-09-08; the same
+        # defect was in four patterns. Do not reintroduce a \s* either
+        # side of a whitespace-bearing class.
+        r"Exterior\s*colou?r(?!\s*/)[\s:]+([A-Z0-9]{2,8})\b",
         re.I,
     ),
     # Vauxhall (Opel): "Color Option\tGAZ" or "Color Option\tGAZ (40R)".
     # The code is the bare token after the label; we don't capture the
     # parenthesised sub-code that sometimes follows.
     re.compile(
-        r"Color\s*Option\s*[:\n\t ]+\s*([A-Z0-9]{2,8})\b",
+        r"Color\s*Option[\s:]+([A-Z0-9]{2,8})\b",   # separator: see above
         re.I,
     ),
     # Fiat / Alfa Romeo / Abarth / Jeep (Stellantis Italian side):
@@ -1494,7 +1557,7 @@ PAINT_CODE_PATTERNS = [
     # The code is on the line immediately after the COLEST label.
     # COLINT (interior) has the same shape but a distinct label.
     re.compile(
-        r"COLEST\s*\n\s*([A-Z0-9]{2,8})\b",
+        r"COLEST[ \t]*\n(?>\s*)([A-Z0-9]{2,8})\b",
         re.I,
     ),
     # Land Rover (newer models): "Paint Exterior Body Colour\nEiger grey-JBC2409".
@@ -1504,7 +1567,7 @@ PAINT_CODE_PATTERNS = [
     # Blue" (Jaguar uses the same label but with a leading dash sub-
     # format that doesn't include a real code).
     re.compile(
-        r"Paint\s*Exterior\s*Body\s*Colou?r\s*\n\s*"
+        r"Paint\s*Exterior\s*Body\s*Colou?r[ \t]*\n(?>\s*)"
         r".+?-([A-Z]{2,}\d{2,})\b",
         re.I,
     ),
@@ -1531,7 +1594,13 @@ PAINT_CODE_PATTERNS = [
     # ran the wait loop to its full deadline. Dots and commas cannot
     # swallow a code paren: the run still stops at "(".
     re.compile(
-        r"(?:Exterior\s*)?(?:Colou?r|Farbe)\s*[:\n]\s*"
+        # [ \t]*[:\n](?>\s*) — NOT "[ \t]*[:\n](?>\s*)". \s overlaps [:\n] on
+        # the newline, so a long blank run let the engine re-partition
+        # it: 140ms on 4000 newlines, quadratic. Leading class is
+        # spaces/tabs only (cannot compete with the separator) and the
+        # trailing run is atomic (cannot be given back). Audit
+        # 2026-09-08 — same family as the cubic case in [2].
+        r"(?:Exterior\s*)?(?:Colou?r|Farbe)[ \t]*[:\n](?>\s*)"
         r"[A-Z0-9][A-Z0-9 .,\-/]*?"
         r"(?:\s*\([A-Z ]+\))?"
         r"\s*\(\s*([A-Z0-9]{2,8})\s*\)",
@@ -1548,7 +1617,7 @@ PAINT_CODE_PATTERNS = [
     # table cells. Two-tone paint (e.g. DS) shows as "EZR/EXY - ..." so
     # we capture only the first code and ignore an optional /SECOND.
     re.compile(
-        r"BODY\s*COLOU?R\s*[:\n\t ]+\s*"
+        r"BODY\s*COLOU?R[\s:]+"                     # separator: see above
         r"([A-Z0-9]{2,6})"            # primary code
         r"(?:/[A-Z0-9]{2,6})?"        # optional second code (two-tone)
         r"\s*-\s*"
@@ -1565,7 +1634,7 @@ PAINT_CODE_PATTERNS = [
     ),
     re.compile(
         r"(?:Paint\s*Code|Colou?r\s*Code|Farbcode|Lackcode)"
-        r"\s*[:\n]\s*([A-Z0-9]{2,8})",
+        r"[ \t]*[:\n](?>\s*)([A-Z0-9]{2,8})",
         re.I,
     ),
 
@@ -1590,7 +1659,7 @@ PAINT_DESCRIPTION_PATTERNS = [
     # (optional group doesn't match), and a name with the finish already
     # inline ("SNAPPER ROCKS BLUE METALLIC (C1G)") is likewise unaffected.
     re.compile(
-        r"(?:Exterior\s*)?(?:Colou?r|Farbe)\s*[:\n]\s*"
+        r"(?:Exterior\s*)?(?:Colou?r|Farbe)[ \t]*[:\n](?>\s*)"
         r"([A-Z0-9][A-Z0-9 .,\-/]*?(?:\s*\([A-Z ]+\))?)"  # name + optional (FINISH)
         r"\s*\(\s*[A-Z0-9]{2,8}\s*\)",                    # then the (code) paren
         re.I,
@@ -1604,7 +1673,7 @@ PAINT_DESCRIPTION_PATTERNS = [
     # inner group is optional. When Jeep matches, group(1) is None — the
     # extraction function below returns "" for that.
     re.compile(
-        r"COLEST\s*\n\s*[A-Z0-9]{2,8}\s*\n\s*"
+        r"COLEST[ \t]*\n(?>\s*)[A-Z0-9]{2,8}[ \t]*\n(?>\s*)"
         r"(?:COLORE\s*ESTERNO|EXTERNAL\s*COLOR)\s*"
         r"(?:\((.+?)\)\s*)?"
         r"\(\s*[A-Z0-9]{2,8}\s*\)",
@@ -1612,7 +1681,7 @@ PAINT_DESCRIPTION_PATTERNS = [
     ),
     # Land Rover format
     re.compile(
-        r"Paint\s*Exterior\s*Body\s*Colou?r\s*\n\s*"
+        r"Paint\s*Exterior\s*Body\s*Colou?r[ \t]*\n(?>\s*)"
         r"(.+?)-[A-Z]{2,}\d{2,}\b",
         re.I,
     ),
@@ -1625,9 +1694,9 @@ PAINT_DESCRIPTION_PATTERNS = [
     # Negative lookahead excludes the newer-LR "<name>-<CODE>" form so
     # this only fires when there isn't a real code.
     re.compile(
-        r"Paint\s*Exterior\s*Body\s*Colou?r\s*\n\s*"
+        r"Paint\s*Exterior\s*Body\s*Colou?r[ \t]*\n(?>\s*)"
         r"(?!.+?-[A-Z]{2,}\d{2,}\b)"
-        # (?!Interior\b) — the \s*\n\s* separator will cross a BLANK value
+        # (?!Interior\b) — the [ \t]*\n(?>\s*) separator will cross a BLANK value
         # cell, so with an empty "Paint Exterior Body Colour" row this
         # captured the NEXT row's label. Same class as the Primastar
         # "Interior Color" leak of 2026-08-15; see _value_is_field_label.
@@ -1653,8 +1722,14 @@ PAINT_DESCRIPTION_PATTERNS = [
     # code stands alone with a newline before the next field, no longer
     # matches.
     re.compile(
-        r"Exterior\s*colou?r[:\t ]*[\t\n][ \t]*"
-        r"\d{3}[ \t]+"                    # 3-digit commercial code, SAME line
+        # Atomic (?>...) on the whitespace runs, same reason as the
+        # separator note in PAINT_CODE_PATTERNS: [:\t ]* / [ \t]* and
+        # [\t\n] overlap on tab, so on a long tab run the engine tried
+        # every partition — 375ms at 8000 tabs, quadratic. Atomic
+        # groups forbid the re-partitioning; nothing a real page
+        # contains needs it. Audit 2026-09-08.
+        r"Exterior\s*colou?r(?>[:\t ]*)[\t\n](?>[ \t]*)"
+        r"\d{3}(?>[ \t]+)"                    # 3-digit commercial code, SAME line
         r"([A-Za-z][A-Za-z0-9 \-/]+?)\s*$",  # the colour name, to line end
         re.I | re.M,
     ),
@@ -1670,9 +1745,9 @@ PAINT_DESCRIPTION_PATTERNS = [
     # bug). The code here is the 5-digit catalogue form; extract_paint_code
     # still picks it up via the Nissan/Volvo code pattern + _normalise_code.
     re.compile(
-        r"Exterior\s*colou?r[ \t]*[\t\n][ \t]*"
-        r"\d{3,5}[ \t]*[\t\n][ \t]*"               # first pair: the code
-        r"Exterior\s*colou?r[ \t]*[\t\n][ \t]*"    # second "Exterior color" label
+        r"Exterior\s*colou?r(?>[ \t]*)[\t\n](?>[ \t]*)"
+        r"\d{3,5}(?>[ \t]*)[\t\n](?>[ \t]*)"               # first pair: the code
+        r"Exterior\s*colou?r(?>[ \t]*)[\t\n](?>[ \t]*)"  # second label
         r"([A-Za-z][A-Za-z0-9 \-/]+?)\s*$",          # the colour name
         re.I | re.M,
     ),
@@ -1700,7 +1775,10 @@ PAINT_DESCRIPTION_PATTERNS = [
     # Jaguar/older-LR "Exterior Paint - <name>" name-only fallback) win
     # first; this only fires when nothing else has.
     re.compile(
-        r"Exterior\s*Paint[ \t]*[\t\n]\s*"      # label + cell boundary
+        # [ ]* not [ \t]* before [\t\n], and the trailing run atomic:
+        # both classes could claim a tab, which made a long tab run
+        # quadratic (1.9s at 12000). Audit 2026-09-08.
+        r"Exterior\s*Paint[ ]*[\t\n](?>\s*)"   # label + cell boundary
         r"(?!-)"                                 # not the "- Solid" value cell
         r"(?!Interior\b)"                        # not the NEXT field's label:
                                                  # when the Exterior Paint cell
@@ -1741,7 +1819,7 @@ VEHICLE_DATA_NEEDLE = re.compile(
     # tripping on the Equipment-tab "Exterior Paint Pack" row (space +
     # word, no boundary) before the Vehicle-data tab has rendered.
     r"Exterior\s*Paint[ \t]*[\t\n]|"
-    r"(?:Colou?r|Farbe)\s*\n\s*[A-Z0-9][A-Z0-9 .,\-/]*\(\s*[A-Z0-9]{2,8}\s*\)",
+    r"(?:Colou?r|Farbe)[ \t]*\n(?>\s*)[A-Z0-9][A-Z0-9 .,\-/]*\(\s*[A-Z0-9]{2,8}\s*\)",
     re.I,
 )
 
@@ -2229,8 +2307,20 @@ def _extract_hyundai_kia_colour(text: str) -> tuple[str, str]:
     # Hyundai/Kia separators still work — tab and newline — because the
     # lookahead requires a TAB followed by the line break, which is
     # exactly what an empty cell looks like and what a real value is not.
+    # The separator is EXACTLY ONE tab or newline, and only SPACES may
+    # precede it — no [ \t]* before a [\t\n], because those overlap and the
+    # engine then tries every partition of a long tab run (measured 2.7s on
+    # 20k tabs; audit 2026-09-08). Structure now does the work a negative
+    # lookahead used to: an EMPTY cell is "color\t\n", so [\t\n] takes the
+    # tab, nothing can take the newline, and the capture — which excludes
+    # \n and \t — cannot start. The match simply fails, which is what the
+    # Primastar case needs, with no lookahead at all.
+    #   Exterior color\tTOMOTO RED        -> TOMOTO RED
+    #   Exterior color\nCREAMY WHITE      -> CREAMY WHITE
+    #   Exterior color \tVALUE            -> VALUE   (leading space kept)
+    #   Exterior color\t\nInterior color  -> no match
     m = re.search(
-        r"Exterior\s*colou?r(?![ \t]*\t[ \t]*\n)[ \t]*[\t\n][ \t]*([^\n\t]+)",
+        r"Exterior\s*colou?r[ ]*[\t\n](?>[ \t]*)([^\n\t]+)",
         text, re.I)
     if not m:
         return "", ""
@@ -2571,7 +2661,7 @@ def _extract_smart_colour(text: str) -> tuple[str, str]:
     if "tridion" not in text.lower():
         return "", ""
     m = re.search(
-        r"Paint\s*Code\s*[:\n\t ]+(.*?)(?:\n(?:Interior|Engine|Transmission)\b)",
+        r"Paint\s*Code[\s:]+(.*?)(?:\n(?:Interior|Engine|Transmission)\b)",
         text, re.I | re.S,
     )
     if not m:
@@ -2620,7 +2710,7 @@ def _extract_mercedes_colour(text: str) -> tuple[str, str]:
     NOTE: the van format is confirmed on a single Sprinter page so far;
     the cleanups are defensive, but more van samples would harden it.
     """
-    m = re.search(r"Paint\s*Code\s*[:\n\t ]+(\d{3,4})\s*\(([^)]*)\)", text, re.I)
+    m = re.search(r"Paint\s*Code[\s:]+(\d{3,4})\s*\(([^)]*)\)", text, re.I)
     if not m:
         return "", ""
     # Interior guard (see _match_is_interior). These pre-pattern
