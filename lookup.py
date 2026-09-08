@@ -307,6 +307,23 @@ COMMERCIAL_FALLBACK: dict[str, str] = {
 # still falls back to Mercedes-Benz Classic. Whether Classic actually
 # carries old commercial vehicles is something we'll learn from real
 # lookups — if it doesn't, the request fails fast and we move on.
+# MOTORRAD_SIBLING — BMW motorcycles live in a SEPARATE partslink24
+# catalogue (bmwmotorrad_parts). VDG reports a motorcycle's make as plain
+# "BMW", exactly as it does a car, so coloureg sends make='BMW' and the
+# car catalogue answers "no results for the specified search" — a correct
+# answer to the wrong question. Confirmed 2026-09-08 on S 1000 R
+# WB10D5209K6A03476: not_found_as_routed from pl24, while the Motorrad
+# catalogue shows "Color RACINGRED UNI/BLACKSTORM METALLIC (N1G)" and the
+# extractor handles that row unchanged.
+#
+# Structural, not a VIN heuristic. Routing on a VIN prefix (WB10 = bike)
+# would be an assertion about VIN structure we have no evidence for; this
+# only fires AFTER the car catalogue has failed to identify the vehicle,
+# so it costs nothing on cars and asserts nothing.
+MOTORRAD_SIBLING: dict[str, str] = {
+    "BMW": "BMW Motorrad",
+}
+
 CLASSIC_SIBLING: dict[str, str] = {
     "BMW":                              "BMW Classic",
     "BMW Motorrad":                     "BMW Motorrad Classic",
@@ -3133,6 +3150,33 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
                 return result
             log(f"Classic sibling failed: {err}")
             catalog_error = f"{catalog_error}; {classic}: {err}"
+            last_leg_error = err
+
+        # Motorrad-sibling retry (BMW only): same shape as Classic above.
+        # Tried after Classic because a modern bike is far likelier than a
+        # classic car, and both are cheap only on a genuine miss. Skipped
+        # on "paint code not found" for the identical reason: the car
+        # catalogue positively identified a vehicle, so this VIN is a car
+        # and the bike catalogue cannot help.
+        #
+        # NOTE the sibling-of-a-sibling gap: a CLASSIC bike reached this
+        # way lands on "BMW Motorrad" and stops. CLASSIC_SIBLING already
+        # maps BMW Motorrad -> BMW Motorrad Classic, but that lookup keys
+        # off the ORIGINAL brand, not the sibling we just tried. Left
+        # deliberately — chaining fallbacks would add a fourth ~10s leg to
+        # every failing BMW, and no classic-bike case has been seen.
+        motorrad = MOTORRAD_SIBLING.get(brand)
+        if (motorrad and motorrad in BRAND_CATALOG_SERVICE
+                and "paint code not found" not in (last_leg_error or "").lower()):
+            log(f"trying Motorrad sibling: {motorrad}")
+            result.paint_code = ""
+            result.paint_description = ""
+            ok, err = _try_catalog(page, row.vin, motorrad, result, debug)
+            if ok:
+                result.via = "catalog:motorrad"
+                return result
+            log(f"Motorrad sibling failed: {err}")
+            catalog_error = f"{catalog_error}; {motorrad}: {err}"
             last_leg_error = err
 
         # Legacy-sibling retry (Opel/Vauxhall only): partslink24 moved the
