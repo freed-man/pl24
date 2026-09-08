@@ -2419,35 +2419,43 @@ def _is_valid_code(code: str) -> bool:
     words like ELECTRIC, PHANTOM, SLEEK, MACHINE, METALLIC, CHAMPION
     are 4+ letters all-alphabetic and get rejected.
 
-    THE REVISIT CONDITION IS NOW MET — recorded 2026-08-08, deliberately
-    NOT acted on. Three real manufacturer codes are 4+ letters with no
-    digit and are therefore DROPPED here:
+    THE REVISIT CONDITION WAS RECORDED 2026-08-08 and is now RESOLVED —
+    differently for each of the three codes it named:
 
         TEKPN  Renault      TERQH  Dacia      PSTDD  Ford
 
-    (all three seen in VDG's output via coloureg; PN3BJ and OV369 from
-    the same families pass, because they contain digits). All three
-    makes ARE routed by this scraper, and five of the code patterns can
-    capture a 5-letter token, so the drop is reachable: the code would
-    be extracted correctly and then silently discarded here, surfacing
-    as paint_data_missing rather than a wrong answer.
+    RENAULT/DACIA — REAL, AND HANDLED. That shape is confirmed: OVDQH
+    (Dacia Spring UU1DBG005RU197157, dealer-confirmed in Renault
+    Dialogys) and OVKQM (Sandero III UU1DJF00671679079) are genuine
+    paint codes, 5 letters, no digit, and this rule rejects both. They
+    reach coloureg only because _extract_renault_body_colour bypasses
+    the digit rule under a TRUSTED-CONTEXT exemption — the code arrives
+    whole-line from a cell labelled literally "BODY COLOUR", so its
+    position proves it is a code and no shape heuristic is needed. See
+    that function. The exemption is per-site: a digit-free code arriving
+    through any OTHER pattern is still dropped here.
 
-    NOT relaxed, because no safe discriminator exists on the evidence we
-    have. The rule's job is to reject colour WORDS, and the obvious
-    tests do not separate the two populations: a vowel-ratio threshold
-    that admits TEKPN (0.2) also admits GREY (0.25), and a length rule
-    cannot tell PSTDD from SLEEK. Guessing a discriminator is exactly
-    the move that produced three wrong PSA rules the previous day.
+    FORD — NOT A DEMONSTRATED LOSS. PSTDD resolves to ZERO rows in
+    coloureg's dataset, in any marque (checked 2026-09-08), so dropping
+    it costs no resolvable code. Ford's paint codes that retailers
+    actually sell against are the 5-character WERS "PN__" series —
+    PN4JF Cyber Orange, PN4BZ Desert Sand, PN5C5 Arizona Beige, 230 of
+    them in the dataset — and every one contains a digit, so they pass
+    this rule unaffected. Absence from the dataset is not proof PSTDD is
+    not a code, but there is no evidence it is one.
 
-    The correct fix, when a real case appears, is upstream: stop the
-    name-shaped patterns capturing names in the first place, using the
-    dump from that case. Until then this is a known FALSE-NEGATIVE class
-    (silently returns nothing) and never a false positive, which is the
-    right direction for it to fail in.
+    STILL NOT RELAXED, for the original reason: no safe discriminator
+    exists for a bare captured token. A vowel-ratio threshold admitting
+    TEKPN (0.2) also admits GREY (0.25); length cannot separate PSTDD
+    from SLEEK. The Renault/Dacia fix was not to weaken the rule but to
+    find a position that makes the rule unnecessary — which is the
+    template for any future case.
 
-    TRIPWIRE: if a Renault, Dacia or Ford lookup returns
-    paint_data_missing on a page that visibly shows a 4+-letter code,
-    this function is the cause.
+    TRIPWIRE (narrowed): if a lookup returns paint_data_missing on a
+    page that visibly shows a 4+-letter digit-free code, AND that code
+    reaches this function through a pattern OTHER than the equipment-row
+    extractor, this rule is the cause. The fix is a labelled-position
+    anchor for that page shape, not a looser rule here.
     """
     if not code:
         return False
