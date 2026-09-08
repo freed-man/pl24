@@ -71,7 +71,7 @@ python lookup.py --vin WV1ZZZ... --make Volkswagen --category N1
 | `--vin VIN --make MAKE` | Look up a single VIN instead of `lookups.txt` |
 | `--category N1` | Category for the single-VIN mode (vans, etc.) |
 | `--fresh` | Ignore the saved session and log in clean (was: deleting `storage_state.json` by hand) |
-| `--debug` | Dump HTML/screenshot to `_debug/<vin>.{html,png}` **on failure** (`_debug/` is wiped at the start of each run). Headless by default — add `--headed` to watch. |
+| `--debug` | Dump artifacts to `_debug/<vin>.{html,png,txt}` **on failure** (`_debug/` is wiped at the start of each run, except `squeeze_prompt.*`). Headless by default — add `--headed` to watch. |
 | `--dump` | Dump on **every** result incl. successes — for inspecting a page that returns a wrong/blank value. Headless by default — add `--headed` to watch. (Renamed from `--dump-always`; no longer forces a window.) |
 | `--skip-brand-check` | **No-op**, accepted only for compatibility. The brand-list verification was removed on 2026-08-01: the 2026-07 partslink24 rebuild replaced the home grid's `<a id="<service>_lc">` anchors with a React component exposing titles and logo slugs but no service ids, so there is nothing left to scrape. `service.py` still passes the flag, hence the parameter remains. |
 | `--no-fallback` | Disable the dashboard SEARCH VIN fallback |
@@ -88,8 +88,9 @@ Via, Outcome, Error`.
 
 - `Paint description` — colour name where partslink24 carries one.
 - `Via` — which leg resolved it: `catalog`, `catalog:commercial`,
-  `catalog:classic`, `catalog:legacy` (Opel/Vauxhall old catalogue), or
-  `dashboard`.
+  `catalog:classic`, `catalog:legacy` (Opel/Vauxhall old catalogue),
+  `catalog:motorrad` (BMW motorcycles — VDG reports them as plain "BMW", so
+  the car catalogue is tried first and misses), or `dashboard`.
 - `Outcome` — machine-parseable status (`success`, `name_only`,
   `paint_data_missing`, `brand_unavailable`, `not_found_as_routed`,
   `unsupported_brand`, `page_load_timeout`, `catalog_ui_error`,
@@ -271,8 +272,17 @@ Selectors are best-effort because partslink24's routes differ by
 manufacturer subscription. If a step fails:
 
 1. Run with `--debug --headed` and watch where it stops (and check the
-   dumped `_debug/<vin>.html` / `.png`). `--debug` alone dumps headless; add
-   `--headed` when you want to watch the browser live.
+   dumped `_debug/<vin>.html`, `.png` and `.txt`). `--debug` alone dumps
+   headless; add `--headed` when you want to watch the browser live.
+
+   **Read the `.txt` first.** It is the exact string the extractors were
+   given — `collect_all_text` output, passed into `dump_debug` rather than
+   re-collected there. The `.html` is `page.content()`, which is a DIFFERENT
+   thing: it is a snapshot taken moments later, it misses anything the
+   serialiser cannot reach, and on an SPA whose DOM moves between the two it
+   will disagree with what was actually parsed. Two sessions were once spent
+   reasoning about a value that appeared in no `.html` because the panel it
+   came from had not been expanded when that file was written.
 2. Inspect the field that should have been filled; copy its `name` or a
    unique attribute.
 3. Add it to the relevant locator/extractor in `lookup.py`:

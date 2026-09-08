@@ -92,7 +92,7 @@ Toyota, Suzuki** — gives a bare `Exterior color\t<CODE>`. Also
 |---|---|---|
 | `vehicle data did not load` | Page never showed paint-bearing data within 10s — slow page, dropped session, or no record of the VIN | Try `--debug`; **often a transient timeout — re-run** (see Transient timeouts below) |
 | `paint code not found on result page` | Vehicle exists in partslink24 but the page has no paint code | Common for Jaguar/Ford/Kia/Hyundai and older PSA; nothing you can do |
-| `brand VIN identification unavailable (indefinite)` | partslink24 has VIN-ID switched OFF for the whole brand | Retryable — works the instant they restore it. Currently affects **Renault + Dacia** |
+| `brand VIN identification unavailable (indefinite)` | partslink24 has VIN-ID switched OFF for the whole brand | Retryable — works the instant they restore it. Affected **Renault + Dacia** until 2026-08; both work now (see below). No brand is known to be disabled at present |
 | `could not be assigned to a distinct model` | Dashboard couldn't pick a brand for this VIN | Add `category=N1` for vans, or VIN is genuinely outside coverage |
 | `unknown make 'X'` | Make in `lookups.txt` not in `MAKE_TO_BRAND` | Check spelling; if legitimate, add the brand |
 | `no make supplied` | Empty make column | Add the make |
@@ -100,7 +100,7 @@ Toyota, Suzuki** — gives a bare `Exterior color\t<CODE>`. Also
 | `VIN box never became editable` | Input stayed disabled within 10s | Often brand VIN-ID disabled (now usually surfaces as `brand_unavailable`); dashboard fallback runs anyway |
 | `VIN box not visible` | Catalog UI didn't render the input | Run `--debug`, check the screenshot |
 | `timeout: <details>` | Playwright browser-level timeout | Usually transient — retry happens automatically |
-| `login failed: login component never rendered` | partslink24's React login component (`<pl24-login-ui>`) did not mount, or its `data-test-id`s changed | See `_debug/login_failed.*`; needs a selector update in `_complete_login_from_current_page` |
+| `login failed: login component never rendered` | partslink24's React login component (`<pl24-login-ui>`) did not mount, or its test-ids changed | See `_debug/login_failed.*` (credential input values are redacted). Selectors already match BOTH `data-test-id` and `data-testid` — the catalogue app renamed that attribute in its 2026-07-31 build and the login app may follow — so a rename alone should no longer cause this. If it still fires, the hook changed shape, not just spelling: update `_both_testid` call sites in `lookup.py` |
 | `session squeeze-out prompt appeared but the Confirm button was not clickable` | The squeeze-out prompt's markup changed | See `_debug/squeeze_prompt.*` (exempt from the stale-dump wipe, so it survives) |
 
 ---
@@ -196,9 +196,25 @@ message is still in the frame HTML, which `BRAND_UNAVAILABLE_RE` matches
   re-checks every run (no skip-list) and works the instant partslink24
   restores the brand. Fast-fails (~1s); dashboard is skipped (it routes
   into the same disabled catalogue).
-- Currently affects the **Renault group: Renault and Dacia.** Renault's
-  paint format therefore **cannot be verified** until partslink24 restores
-  it.
+- **RESOLVED for Renault and Dacia (2026-08).** partslink24 restored
+  VIN-ID for the Renault group and the paint format has since been verified
+  on three cars: Clio V `VF1RJA00773682232` → `OV369` "ICE WHITE BC",
+  Dacia Spring `UU1DBG005RU197157` → `OVDQH` "GREEN LICHEN GREY", Sandero
+  III `UU1DJF00671679079` → `OVKQM` "GREY DUSTY". The first two are
+  dealer-confirmed in Renault Dialogys, code and name verbatim.
+
+  Their paint code is NOT in the "Vehicle data" panel — it is a
+  `<CODE> - BODY COLOUR` row inside the **"Equipment" accordion**, which
+  partslink24 leaves COLLAPSED and which MUI leaves UNMOUNTED while
+  collapsed, so the row is absent from the DOM rather than merely hidden.
+  `wait_for_vehicle_data` opens the panel itself; see
+  `EQUIPMENT_PANEL_SEL` and `_extract_renault_body_colour` in `lookup.py`.
+  Symptom if that breaks: Renault/Dacia lookups return
+  `paint_data_missing` AND take ~11s instead of ~2s, because the existing
+  needle can only match once the row is mounted.
+
+  No brand is known to have VIN-ID disabled at present. If a whole brand
+  starts returning this outcome, it is partslink24's switch, not us.
 
 ---
 
@@ -214,9 +230,27 @@ Classic-sibling brands (BMW, MINI, Mercedes, Porsche, VW, BMW
 Motorrad), and Opel/Vauxhall (live PSA catalogue ↔ legacy catalogue) may try
 multiple catalogues before the dashboard. The error string concatenates every
 leg separated by `; `, and the **`Via`** column now records which leg won:
-`catalog`, `catalog:commercial`, `catalog:classic`, `catalog:legacy`, or
-`dashboard`. Full walk order: routed catalogue → commercial sibling → Classic
-sibling → Legacy sibling → dashboard.
+`catalog`, `catalog:commercial`, `catalog:classic`, `catalog:motorrad`,
+`catalog:legacy`, or `dashboard`. Full walk order: routed catalogue →
+commercial sibling → Classic sibling → Motorrad sibling (BMW only) → Legacy
+sibling → dashboard.
+
+### partslink24 test-id attribute rename (2026-07-31 build)
+
+The catalogue app renamed `data-test-id` → `data-testid` (no hyphen). A
+single-spelling selector goes blind and fails SILENTLY — the symptom is not
+an error but a wrong-looking success: Dacia Sandero `UU1DJF00671679079`
+returned `paint_data_missing` in ~11s (full deadline) because the Equipment
+panel could not be found to open, while a Dacia captured under the older
+build worked. **Every dump carries `<!-- Build timestamp: ... -->`; check it
+before trusting a dump as evidence about current behaviour.**
+
+All test-id selectors now match both spellings (`_both_testid` in
+`lookup.py`), and neither is treated as "the old one" — caches, staged
+rollouts and rollbacks all mean the older markup can reappear, and the login
+app was still serving the hyphenated form after the catalogue app had moved.
+
+---
 
 ### `no results for the specified search; Vauxhall legacy: ... ` → `catalog:legacy`
 
@@ -461,7 +495,7 @@ human-readable `Error`. Values:
 | `success` | Paint code was extracted (and often a name) |
 | `name_only` | Colour name captured but no code (Ford, Jaguar, some LR, Hyundai/Kia, etc.) |
 | `not_found_as_routed` | All catalogues tried said "not here". Could be genuinely absent OR mis-routed (e.g. forgot `category=N1`). Asserts about the *attempt*, not partslink24's DB. |
-| `brand_unavailable` | partslink24 has VIN-ID switched OFF for the whole brand (Renault, Dacia). **Retryable.** |
+| `brand_unavailable` | partslink24 has VIN-ID switched OFF for the whole brand. **Retryable.** No brand is currently known to be affected — Renault and Dacia were, until 2026-08 |
 | `unsupported_brand` | Make not in `MAKE_TO_BRAND` (Honda, Maserati, Subaru, Tesla, Isuzu, Lotus, Genesis) |
 | `paint_data_missing` | Page loaded but no code AND no name (IVECO, MAN, old Alfa, empty-cell Ford) |
 | `page_load_timeout` | Catalog/dashboard never returned data within the timeout — **often transient, re-run** |
@@ -493,9 +527,11 @@ recoveries) in the data.
 
 ## Tips
 
-- For any uncertain error, run with `--debug` (dumps HTML/PNG to
-  `_debug/<vin>.{html,png}` on failure; `_debug/` wiped at the start of each
-  run). Use `--dump` to dump on *every* result, including successes. Both run
+- For any uncertain error, run with `--debug` (dumps to
+  `_debug/<vin>.{html,png,txt}` on failure; `_debug/` wiped at the start of
+  each run, except `squeeze_prompt.*`). **The `.txt` is the authoritative
+  one** — it is the exact text handed to the extractors, not a re-read of
+  the page; see NOTES.md. Use `--dump` to dump on *every* result, including successes. Both run
   **headless by default** — add `--headed` to watch the browser live (e.g.
   `--debug --headed`). Neither flag implies a window any more.
 - For login problems, `--fresh` ignores the saved session and starts clean.
