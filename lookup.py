@@ -2582,6 +2582,17 @@ def _is_valid_code(code: str) -> bool:
     return any(c.isdigit() for c in code)
 
 
+
+def extract_paint_description(text: str) -> str:
+    """Colour name, Title Cased, or "" if there isn't a meaningful one.
+
+    Thin gate over _extract_paint_description_raw so every pattern and
+    every pre-pattern extractor passes through one content check — see
+    _description_is_meaningful."""
+    desc = _extract_paint_description_raw(text)
+    return desc if _description_is_meaningful(desc) else ""
+
+
 def _normalise_code(code: str) -> str:
     """Post-process a raw extracted paint code.
 
@@ -2824,7 +2835,40 @@ def _extract_psa_body_colour(text: str) -> str:
     return _titlecase_colour(v)
 
 
-def extract_paint_description(text: str) -> str:
+_DESC_HAS_CONTENT_RE = re.compile(r"[A-Za-z0-9]")
+
+
+def _description_is_meaningful(value: str) -> bool:
+    """A colour NAME must contain at least one alphanumeric character.
+
+    partslink24 fills an unset cell with a placeholder rather than leaving
+    it blank — "-", "--", ".", "/", "()", ":" all occur — and every
+    value-side pattern here captures with .+ or [^\n]+, which accept
+    punctuation happily. Swept 2026-09-08: 45 label/placeholder
+    combinations returned the placeholder AS the colour name, e.g.
+    "BODY COLOUR\n-" -> "-". A customer would have been told their car's
+    colour is a hyphen.
+
+    This is the third symptom of one root cause, and the sweep that found
+    it came from a sibling project hitting the same class:
+
+      Primastar 2026-09  EMPTY cell, pattern crossed the blank and took
+                         the NEXT field's LABEL   -> _value_is_field_label
+      here      2026-09  EMPTY cell filled with a PLACEHOLDER, pattern
+                         took the placeholder     -> this function
+
+    Both are "the value is absent and the pattern accepted something
+    anyway". When adding a value-side pattern, ask what it returns when
+    the cell is empty, and what it returns when the cell holds "-".
+
+    Applied as a single gate rather than per-site: unlike the interior
+    guard, which is a judgement about MEANING, this is a universal
+    validity rule for a name — the direct analogue of _is_valid_code for
+    a code — so there is no pattern for which the answer differs."""
+    return bool(_DESC_HAS_CONTENT_RE.search(value))
+
+
+def _extract_paint_description_raw(text: str) -> str:
     """Extract the human-readable colour name (e.g. "STERLINGGRAU") and
     return it Title Cased ("Sterlinggrau"). Returns "" if no description
     is on the page (e.g. VW/Audi don't include one in the paint row, and
