@@ -397,16 +397,43 @@ class PoolWorker:
 # ---------------------------------------------------------------------------
 worker: PoolWorker | None = None
 
-# Hard ceiling on how long a single request will wait for the worker. The
-# fallback chain has grown since this default was 60s: worst case is now a
-# proactive re-login (~10s) + up to FOUR catalogue legs (routed -> commercial
-# sibling -> Classic -> legacy), each a 10s wait + one 10s silent-timeout
-# re-submit, + the dashboard — ~100s if every leg times out. That's rare
-# (most legs fast-fail in ~1-3s; the Caddy fallback run was 17s total), but
-# 120s covers the true worst case. On timeout the job is abandoned to finish
-# in the background and the NEXT request queues behind it (pool_size=1), so
-# the coloureg side should keep its own shorter client timeout and treat a
-# timeout as "no paint from pl24" rather than blocking the user.
+# Hard ceiling on how long a single request will wait for the worker.
+#
+# CURRENT ARITHMETIC (recount it whenever a leg is added — audit 2026-09-08
+# found this comment had gone stale and understated the walk):
+#   per leg, pathological: 10s VIN box (_wait_for_editable)
+#                        + 10s vehicle data (wait_for_vehicle_data)
+#                        + 10s silent-timeout re-submit  = 30s
+#   longest walk: 4 legs — routed -> commercial|Classic|Motorrad|legacy
+#                 -> dashboard. BMW, Mercedes-Benz (+Trucks/Vans) and
+#                 Volkswagen (+Commercial) are the brands that reach 4.
+#   session establishment: up to ~21s (measured on a real run with an
+#                 expired session plus a squeeze-out prompt).
+#   => 4 x 30 + 21 = 141s worst case, against this 120s ceiling.
+#
+# THE 21s OVERRUN IS ACCEPTED DELIBERATELY (decision 2026-09-08). Reaching
+# it needs EVERY timeout on EVERY leg to expire in the same lookup, which
+# has never been observed — real legs fast-fail in 1-3s and the Caddy
+# fallback run was 17s end to end. The alternatives were each worse:
+# raising this ceiling buys the worker time nobody is waiting for, because
+# coloureg holds a SHORTER client timeout and has already given up;
+# shortening the later legs is a behaviour change with no evidence behind
+# it. The failure mode when it does happen is understood and bounded — the
+# client gets its 504, the job is abandoned, and the wall-clock bound in
+# wait_for_vehicle_data prevents the far worse 78s-per-leg version that
+# existed before it.
+#
+# What is NOT accepted is this number drifting further. The Motorrad
+# sibling took BMW from 3 legs to 4 (111s -> 141s) and nobody did the sum,
+# because a sibling map is cheap to add and its cost is invisible at the
+# call site. pl24_http_harness.py now pins 141s and fails if the walk
+# grows, which forces this paragraph to be re-read before another leg
+# ships.
+#
+# On timeout the job is abandoned to finish in the background and the NEXT
+# request queues behind it (pool_size=1), so the coloureg side should keep
+# its own shorter client timeout and treat a timeout as "no paint from
+# pl24" rather than blocking the user.
 REQUEST_TIMEOUT_S = float(os.environ.get("PL24_REQUEST_TIMEOUT_S", "120"))
 
 

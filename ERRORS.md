@@ -235,6 +235,26 @@ leg separated by `; `, and the **`Via`** column now records which leg won:
 commercial sibling → Classic sibling → Motorrad sibling (BMW only) → Legacy
 sibling → dashboard.
 
+### A lookup took ~140s and the client 504'd
+
+Accepted behaviour, not a fault. The fallback walk is bounded at 4 legs
+(BMW, Mercedes, Volkswagen reach it) and each leg can pathologically cost
+30s — 10s VIN box + 10s vehicle data + 10s silent-timeout re-submit —
+plus up to ~21s to establish a session. 141s worst case against a 120s
+`REQUEST_TIMEOUT_S`; the 21s overrun was accepted deliberately on
+2026-09-08, with the reasoning at that constant in `service.py`.
+
+Reaching it needs every timeout on every leg to expire in one lookup,
+which has never been observed — real legs fast-fail in 1–3s. On timeout
+the job is abandoned to finish in the background and the next request
+queues behind it (pool_size 1), so coloureg should keep its own shorter
+client timeout and treat a pl24 timeout as "no paint from pl24".
+
+**If you add a fallback leg, re-do that arithmetic first.**
+`pl24_http_harness.py` pins 141s and goes red if the walk grows.
+
+---
+
 ### partslink24 test-id attribute rename (2026-07-31 build)
 
 The catalogue app renamed `data-test-id` → `data-testid` (no hyphen). A
