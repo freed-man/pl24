@@ -1511,8 +1511,21 @@ PAINT_CODE_PATTERNS = [
     # through to the "Exterior colour" pattern below — returning the TRIM
     # code (C05) instead of the body code. A silent wrong answer, not a
     # miss. Found by metamorphic CRLF-perturbation testing 2026-08-08.
+    # re.I IS LOAD-BEARING, and its absence was a latent regression to the
+    # original Suzuki bug. Without it this pattern encodes the exact casing
+    # of one observed page — capitalised "Color" first, lowercase
+    # "exterior color" second. Change either (ALL CAPS, all lower, or even
+    # just the British "Colour" in both positions) and the match fails,
+    # extraction falls through, and a LATER pattern returns C05 — the TRIM
+    # code, i.e. precisely the wrong answer found and fixed on 2026-08-08.
+    # That is a silent wrong answer, not a miss, on a dealer-verified
+    # estate, and the battery would not have caught it because its fixture
+    # uses the observed casing. partslink24 demonstrably does change its
+    # markup (it renamed data-test-id in the 2026-07-31 build). Found by
+    # audit 2026-09-08. Every other extraction pattern already carried
+    # re.I; this one was the outlier.
     re.compile(r"(?m)^Colou?r[ \t\r]*\n[ \t\r]*([A-Z0-9]{2,8})[ \t\r]*\n"
-               r"[ \t\r]*Exterior\s*colou?r\b"),
+               r"[ \t\r]*Exterior\s*colou?r\b", re.I),
 
     # VW/Audi: "Exterior color / Paint Code\n8E / A7W" — code after the slash.
     # POST-slash choice dealer-verified 2026-08-08 (Golf, LA7N vs page
@@ -2381,7 +2394,7 @@ def _extract_hyundai_kia_colour(text: str) -> tuple[str, str]:
 
 
 RENAULT_BODY_COLOUR_RE = re.compile(
-    r"(?m)^[ \t]*([A-Z0-9]{2,8})[ \t]*-[ \t]*BODY COLOURS?[ \t]*$")
+    r"(?m)^[ \t]*([A-Z0-9]{2,8})[ \t]*-[ \t]*BODY COLOURS?[ \t]*$", re.I)
 
 
 def _extract_renault_body_colour(text: str) -> tuple[str, str]:
