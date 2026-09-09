@@ -707,6 +707,33 @@ def handle_session_squeeze_out(page: Page) -> bool:
     )
 
 
+def _slot_tag(page: Page) -> str:
+    """Filename discriminator for the pool slot a page belongs to.
+
+    The squeeze and login-failure dumps use FIXED filenames, because both
+    fire at moments where a VIN may not exist yet. That was safe while the
+    pool had one slot. With PL24_ACCOUNTS set it is not: both slots log in
+    CONCURRENTLY at startup (observed 2026-09-09 — two "logging in" lines
+    in the same second), so if partslink24 squeezes both, two threads write
+    the same .html and .png at once. The result is not a crash; it is worse
+    — a mixed artifact, slot A's HTML beside slot B's screenshot, which is
+    exactly the "artifact that lies to you" failure that cost two sessions
+    on the Vauxhall bug. Tagging by ACCOUNT also answers the first question
+    you would ask of such a dump: which user got squeezed?
+
+    Falls back to "" when the page has no bound account (CLI, or the
+    single-slot service on environment credentials), which keeps the
+    historical filenames exactly as documented in NOTES.md/ERRORS.md."""
+    try:
+        creds = _PAGE_CREDENTIALS.get(page)
+    except TypeError:
+        creds = None
+    if creds is None:
+        return ""
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", creds.username)[:24]
+    return f"_{safe}"
+
+
 def _dump_squeeze_prompt(page: Page) -> None:
     """Snapshot the squeeze-out prompt the instant it is seen.
 
@@ -715,12 +742,13 @@ def _dump_squeeze_prompt(page: Page) -> None:
     this one has to fire while the prompt is still on screen."""
     try:
         DEBUG_DIR.mkdir(exist_ok=True)
-        page.screenshot(path=str(DEBUG_DIR / "squeeze_prompt.png"),
+        tag = _slot_tag(page)
+        page.screenshot(path=str(DEBUG_DIR / f"squeeze_prompt{tag}.png"),
                         full_page=True)
-        (DEBUG_DIR / "squeeze_prompt.html").write_text(
+        (DEBUG_DIR / f"squeeze_prompt{tag}.html").write_text(
             _redact_page_html(page.content()), encoding="utf-8"
         )
-        log(f"saved squeeze_prompt.* under {DEBUG_DIR.name}/")
+        log(f"saved squeeze_prompt{tag}.* under {DEBUG_DIR.name}/")
     except Exception:
         pass
 
@@ -1130,11 +1158,13 @@ def _redact_page_html(html: str) -> str:
 def _dump_login_failure(page: Page) -> None:
     try:
         DEBUG_DIR.mkdir(exist_ok=True)
-        page.screenshot(path=str(DEBUG_DIR / "login_failed.png"), full_page=True)
-        (DEBUG_DIR / "login_failed.html").write_text(
+        tag = _slot_tag(page)
+        page.screenshot(path=str(DEBUG_DIR / f"login_failed{tag}.png"),
+                        full_page=True)
+        (DEBUG_DIR / f"login_failed{tag}.html").write_text(
             _redact_page_html(page.content()), encoding="utf-8"
         )
-        log(f"saved login_failed.* under {DEBUG_DIR.name}/")
+        log(f"saved login_failed{tag}.* under {DEBUG_DIR.name}/")
     except Exception:
         pass
 
@@ -3686,12 +3716,18 @@ def _clear_stale_debug_dumps() -> None:
     demand. Clearing it at the start of the next run (which is what
     happened on 2026-08-01: the prompt fired at 07:30:00 and the next CLI
     invocation wiped it 11s later) defeats the entire point of capturing
-    it. It is overwritten naturally the next time a prompt occurs."""
-    keep = {"squeeze_prompt.html", "squeeze_prompt.png"}
+    it. It is overwritten naturally the next time a prompt occurs.
+
+    Matched by PREFIX, not exact name. Multi-slot dumps carry an account
+    tag (squeeze_prompt_admin.html — see _slot_tag), and an exact-name
+    exemption would have silently deleted every tagged one while appearing
+    to work. This is the second time this cleaner has been missed by a
+    filename change; the first was the .txt dump below."""
+    keep_prefix = "squeeze_prompt"
     if DEBUG_DIR.exists():
         cleared = 0
         for f in DEBUG_DIR.iterdir():
-            if f.name in keep:
+            if f.name.startswith(keep_prefix):
                 continue
             # .txt added 2026-08 with the rendered-text dump. Omitting
             # it here left stale .txt files from a PREVIOUS vin sitting in
