@@ -2249,7 +2249,26 @@ def wait_for_vehicle_data(page: Page, timeout_ms: int = 10_000) -> str | None:
     return None
 
 
-_VALUE_IS_FIELD_LABEL_RE = re.compile(r"^\s*Interior\b", re.I)
+# Sibling FIELD LABELS that sit in the same table as a colour row, so an
+# absent value can leak one of them as the "colour". Every entry below was
+# observed in a real dump next to a colour row:
+#   Interior    "Interior color" (Nissan Primastar), "Interior Fabric"
+#               (Ford), "INTERIOR TRIM TYPE" (PSA, Opel, Peugeot)
+#   Upholstery  "UPHOLSTERY COLOUR" (3 dumps), "Upholstery" (BMW)
+#   Trim        "TRIM LEVEL" (3 dumps), "TRIM ADAPTATION"
+#   Roof        "ROOF HEIGHT", "ROOF (EXT. ASPECT)", "Roof color" (VW)
+#   Bonnet      "BONNET COLOUR" (Opel — the row whose VALUE caused the
+#               2026-09 "Paintwork" leak)
+#
+# Only "Interior" was guarded until 2026-09-08. That happened to cover
+# every case we can currently reach, because on all five real page
+# families the row FOLLOWING the colour row starts with "Interior" — but
+# that is an accident of row order, not a property of the format, and a
+# partslink24 layout change would expose the rest. This list is bounded
+# by observation, not open-ended: add a label only when a real dump shows
+# it adjacent to a colour row.
+_VALUE_IS_FIELD_LABEL_RE = re.compile(
+    r"^\s*(?:Interior|Upholstery|Trim|Roof|Bonnet)\b", re.I)
 
 
 def _value_is_field_label(value: str) -> bool:
@@ -2841,13 +2860,20 @@ _DESC_HAS_CONTENT_RE = re.compile(r"[A-Za-z0-9]")
 def _description_is_meaningful(value: str) -> bool:
     """A colour NAME must contain at least one alphanumeric character.
 
-    partslink24 fills an unset cell with a placeholder rather than leaving
-    it blank — "-", "--", ".", "/", "()", ":" all occur — and every
-    value-side pattern here captures with .+ or [^\n]+, which accept
-    punctuation happily. Swept 2026-09-08: 45 label/placeholder
-    combinations returned the placeholder AS the colour name, e.g.
-    "BODY COLOUR\n-" -> "-". A customer would have been told their car's
-    colour is a hyphen.
+    Every value-side pattern here captures with .+ or [^\n]+, which accept
+    punctuation happily: a synthetic sweep found 45 label/placeholder
+    combinations returning the placeholder AS the colour name, e.g.
+    "BODY COLOUR\n-" -> "-".
+
+    HONEST PROVENANCE. An earlier version of this comment asserted that
+    partslink24 "fills an unset cell with a placeholder ... '-', '--',
+    '.', '/', '()' all occur". That was INVENTED, and a later sweep of
+    every real dump found ZERO non-alphanumeric values in any colour or
+    paint cell — partslink24 leaves an unset cell genuinely EMPTY. So
+    this gate is DEFENCE IN DEPTH against a shape not yet observed, not a
+    fix for a seen failure. It is kept because it can only turn junk into
+    nothing and never changes a real answer, but do not cite it as
+    evidence that placeholders occur.
 
     This is the third symptom of one root cause, and the sweep that found
     it came from a sibling project hitting the same class:
