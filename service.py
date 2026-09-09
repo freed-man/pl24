@@ -378,6 +378,19 @@ class PoolWorker:
     def sessions_alive(self) -> int:
         return sum(1 for s in self._sessions if s.is_alive())
 
+    def usage(self) -> list[dict]:
+        """Per-slot lookups served and browser uptime. Observability only —
+        see Session.usage. Reported on /health so container memory can be
+        correlated with actual work rather than guessed at."""
+        out = []
+        for s in self._sessions:
+            try:
+                served, up = s.usage()
+            except Exception:
+                served, up = -1, -1.0
+            out.append({"lookups_served": served, "browser_uptime_s": round(up)})
+        return out
+
     def stop(self) -> None:
         """Post the shutdown sentinel and wait for the slots to wind down.
 
@@ -504,6 +517,7 @@ async def health():
         "status": "ok",
         "pool_size": POOL_SIZE,
         "sessions_alive": worker.sessions_alive(),
+        "slots": worker.usage(),
     }
 
 

@@ -3957,6 +3957,28 @@ class Session:
         # across requests without any datastore, and a worker restart correctly
         # resets it (a fresh process means a fresh login). None until start().
         self._last_interaction: float | None = None
+        self._lookups_served = 0
+        self._started_at = time.monotonic()
+
+    def usage(self) -> tuple[int, float]:
+        """(lookups served, seconds since this session's browser started).
+
+        OBSERVABILITY ONLY — nothing acts on these. A slot's browser,
+        context and page are created once at start() and held for the life
+        of the process: the idle path only re-AUTHENTICATES the same
+        browser, and the only rebuild is the pool's crash-retry. So a
+        Chromium here runs until the container restarts, and as of
+        2026-09-09 there are TWO of them rather than one.
+
+        No leak has been observed in this workload and no recycler is
+        implemented, deliberately — building one on the general reputation
+        of long-lived browsers would be speculation, and an unnecessary
+        recycle costs a login and a squeeze-out risk. But the risk profile
+        doubled the day PL24_ACCOUNTS was set and nothing existed to
+        measure it. Surfaced on /health these let memory be correlated with
+        actual work: if RSS tracks lookups_served it is a leak worth
+        acting on; if it tracks uptime alone it is not. Decide from data."""
+        return self._lookups_served, time.monotonic() - self._started_at
 
     def _mark_interaction(self) -> None:
         """Record that the session just did real work (is alive now). Called
@@ -4106,6 +4128,7 @@ class Session:
         # count — leaving the clock stale so the next request re-logs-in.
         if result.outcome in _SESSION_PROVEN_ALIVE_OUTCOMES:
             self._mark_interaction()
+        self._lookups_served += 1      # observability only; see usage()
         return result
 
     def _force_relogin(self) -> None:
