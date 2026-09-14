@@ -2675,6 +2675,26 @@ def extract_paint_description(text: str) -> str:
     every pre-pattern extractor passes through one content check — see
     _description_is_meaningful."""
     desc = _extract_paint_description_raw(text)
+    # TWO gates, both universal, both here rather than per-site:
+    #   _value_is_field_label   — the value is the NEXT ROW'S LABEL
+    #   _description_is_meaningful — the value has no real character
+    #
+    # The field-label check also exists inside two extractors, and that is
+    # deliberate redundancy rather than an oversight: those return a (code,
+    # description) pair, so rejecting there suppresses the CODE slot too,
+    # which a description-only gate cannot do. What was NOT deliberate is
+    # that it existed ONLY there. Audit 2026-09-09 found it applied to 2 of
+    # 5 extractors and to none of PAINT_DESCRIPTION_PATTERNS, so
+    # "Paint Exterior Body Colour\nUPHOLSTERY COLOUR" returned "Upholstery
+    # Colour" and "Exterior Paint\tROOF HEIGHT" returned "Roof Height".
+    #
+    # That is the third bug from one root cause — a guard applied at some
+    # sites and not others — after the 2026-08-08 interior leak and the
+    # 2026-09 Primastar leak. Putting it at the choke point is the
+    # structural fix: a new extractor or pattern cannot be added without
+    # it, because there is no longer a site to forget.
+    if _value_is_field_label(desc):
+        return ""
     return desc if _description_is_meaningful(desc) else ""
 
 
