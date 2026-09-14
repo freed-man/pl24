@@ -1028,7 +1028,30 @@ def _bump_login_generation() -> None:
         LOGIN_GENERATION += 1
 
 
+# Longest login-error string that may leave this process. partslink24's
+# page content is not ours, and this string travels: result.error -> the
+# HTTP response body -> a column in coloureg's database. If that column is
+# VARCHAR rather than TEXT, an over-long error fails the INSERT and loses
+# the WHOLE ROW — so a login problem would destroy the record that would
+# have diagnosed it. 200 leaves room for the "login failed: " prefix inside
+# a 255-char column while keeping every real message intact (the longest
+# observed is ~60 chars). Same belt-and-braces reasoning as the VIN echo's
+# [:32] in service.py, which is also already framework-bounded.
+_LOGIN_ERROR_MAX = 200
+
+
 def _extract_login_error(page: Page) -> str:
+    """Login error text, bounded. Thin gate over the raw extractor so all
+    four of its return paths pass one length check — the raw/wrapper shape
+    used by extract_paint_description, rather than a slice at each site
+    that a fifth return path could later miss."""
+    msg = _extract_login_error_raw(page)
+    if len(msg) > _LOGIN_ERROR_MAX:
+        return msg[:_LOGIN_ERROR_MAX - 3] + "..."
+    return msg
+
+
+def _extract_login_error_raw(page: Page) -> str:
     """Pull the actual error message off the login page.
 
     partslink24's HTML puts a literal '►' bullet character in its own
