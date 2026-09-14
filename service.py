@@ -7,9 +7,13 @@ returns no paint code.
 
     GET /lookup-paint?vin=...&make=...&category=...&year=...
         -> {"vin", "paint_code", "paint_description", "via", "outcome",
-            "error", "elapsed_s"}
+            "error", "elapsed_s", "slot"}
+           "slot" is the pool slot INDEX that ran it, or null if the caller
+           gave up while the job was still queued. Present on the 502/504
+           error body too.
     GET /health
-        -> {"status": "ok", "sessions_alive": N, "pool_size": N}
+        -> {"status": "ok", "sessions_alive": N, "pool_size": N,
+            "slots": [{"lookups_served": N, "browser_uptime_s": N}, ...]}
 
 DESIGN (speed-first):
   * WARM sessions. A pool of logged-in browser Sessions is created at startup
@@ -179,7 +183,8 @@ _REQUIRED_ENV = ("PARTSLINK24_COMPANY_ID", "PARTSLINK24_USERNAME",
 # its threading.Event for the result.
 # ---------------------------------------------------------------------------
 class _Job:
-    __slots__ = ("row", "debug", "done", "result", "error", "abandoned")
+    __slots__ = ("row", "debug", "done", "result", "error", "abandoned",
+                 "slot")
 
     def __init__(self, row: LookupRow, debug: bool):
         self.row = row
@@ -187,6 +192,23 @@ class _Job:
         self.done = threading.Event()
         self.result = None      # LookupResult on success
         self.error = None       # Exception/string on hard failure
+        # Pool slot that actually ran this job, stamped at dequeue. MUST be
+        # initialised here: reading an unassigned __slots__ attribute raises
+        # AttributeError rather than returning None, and a job whose caller
+        # times out while it is still QUEUED is never dequeued and never
+        # stamped — so the response builder would 500 on exactly the
+        # abandonment path this field is most useful for. Stays None there,
+        # and consumers must treat null as "never picked up".
+        #
+        # It is the INDEX, not the username: an account name in coloureg's
+        # database and in every API response is a credential identifier for
+        # no operational gain. Indices are POSITIONAL — slot 0 is the first
+        # entry in PL24_ACCOUNTS — so reordering that JSON silently remaps
+        # the meaning of historical rows. The startup log prints the mapping
+        # ("[pool] starting session 1/2 (gb-900691/admin)"), which is how you
+        # recover it; do not compare slot numbers across a change to
+        # PL24_ACCOUNTS without checking that log.
+        self.slot = None
         # Set by submit() when the caller's wait times out while the job is
         # still QUEUED (or in flight). A queued-but-abandoned job is skipped
         # at dequeue instead of driving a real partslink24 lookup nobody is
@@ -316,6 +338,8 @@ class PoolWorker:
         try:
             while True:
                 job = self._jobs.get()
+                if job is not None:
+                    job.slot = idx          # telemetry; see _Job.slot
                 if job is None:
                     # Re-post so sibling slots also see the sentinel.
                     self._jobs.put(None)
@@ -611,6 +635,7 @@ async def lookup_paint(
                 "outcome": "service_error",
                 "error": job.error,
                 "elapsed_s": elapsed,
+                "slot": job.slot,
             },
             status_code=504 if "timeout" in (job.error or "") else 502,
         )
@@ -624,6 +649,7 @@ async def lookup_paint(
         "outcome": r.outcome,
         "error": r.error,
         "elapsed_s": elapsed,
+        "slot": job.slot,
     }
 
 
