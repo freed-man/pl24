@@ -1599,7 +1599,19 @@ PAINT_CODE_PATTERNS = [
     # Requires Python 3.11+; the container is 3.12 (playwright noble image).
     re.compile(
         r"Exterior\s*colou?r\s*/\s*Paint\s*Code(?>\s*)[:\n]?(?>\s*)"
-        r"(?>[A-Z0-9]+)\s*/\s*([A-Z0-9]{2,8})",
+        # [ \t]*/[ \t]* NOT \s*/\s*: \s crosses a NEWLINE, so an EMPTY
+        # post-slash cell let the capture jump to the next row. Porsche
+        # Macan WP1ZZZXA1SL156688 renders
+        #     Exterior color / Paint Code
+        #     89 /
+        #     Seat combination no.
+        # with nothing after the slash — the pre-slash 89 is the exterior
+        # ORDER code, see the VW/Audi ledger entry — and this captured
+        # "Seat". Only _is_valid_code's 4-letter all-alpha rule stopped it;
+        # a 2- or 3-letter next label like "PR" would have been RETURNED.
+        # Same empty-cell class as the Primastar leak, on the CODE side.
+        # Audit 2026-09-09.
+        r"(?>[A-Z0-9]+)[ \t]*/[ \t]*([A-Z0-9]{2,8})",
         re.I,
     ),
     # Nissan: "Exterior color\tZ11" — code follows the label directly,
@@ -1710,6 +1722,19 @@ PAINT_CODE_PATTERNS = [
         re.I,
     ),
     re.compile(
+# (?m)^[ \t]* — the label must START ITS LINE. Without a left anchor
+        # "Colou?r\s*Code" matched the TAIL of a longer label: on Porsche
+        # Macan WP1ZZZXA1SL156688 it matched inside "Carpet color code" and
+        # returned BLK, the CARPET colour, as the exterior paint code. That
+        # reached a customer. It also matches "Paint Code" inside "Exterior
+        # color / Paint Code" and takes the pre-slash ORDER code (89 on that
+        # page) — two wrong answers from one missing anchor.
+        #
+        # Line-start is safe rather than restrictive: the pattern already
+        # requires [:\n] immediately after the label, so a tab-delimited
+        # "<field>\tPaint Code\t9744" never matched anyway — verified
+        # 2026-09-09 before anchoring. Audit 2026-09-09.
+        r"(?m)^[ \t]*"
         r"(?:Paint\s*Code|Colou?r\s*Code|Farbcode|Lackcode)"
         r"[ \t]*[:\n](?>\s*)([A-Z0-9]{2,8})",
         re.I,
