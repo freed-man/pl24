@@ -340,6 +340,44 @@ COMMERCIAL_FALLBACK: dict[str, str] = {
 # would be an assertion about VIN structure we have no evidence for; this
 # only fires AFTER the car catalogue has failed to identify the vehicle,
 # so it costs nothing on cars and asserts nothing.
+# Brands whose partslink24 CATALOGUE LAUNCHER is broken upstream, so the
+# routed catalogue leg can never succeed and is skipped entirely.
+#
+# Subaru, added 2026-09-09. It is a new catalogue (partslink24 went 54 -> 55
+# catalogues) served by the LEGACY p5 platform, and
+# launchCatalog.do?service=subaru_parts redirects into p5 with the session
+# placeholder UNSUBSTITUTED:
+#     /p5/latest/p5.html#/p5subaru~subaru_parts?session=${pl24SessionId}
+# p5 then renders an error page: Invalid serviceName
+# "subaru_parts?session=${pl24SessionId}". Clicking the Subaru logo on the
+# manufacturer grid works, because the grid's own JS supplies the session —
+# so this is partslink24's bug, not ours, and NOT something a selector can
+# fix: there is no VIN box on an error page. The single input the old
+# selector matched (#direct_entry) was that error page's static shell.
+#
+# Diagnosed only because the "VIN box not visible (N matched)" count said
+# 1 rather than 2, which ruled out the shadowing theory and pointed at the
+# page never being a catalogue at all.
+#
+# REMOVE THIS ENTRY when partslink24 fix the launcher — a stale entry would
+# silently keep Subaru on the slower dashboard leg forever. Test: does
+# launchCatalog.do?service=subaru_parts reach a VIN box?
+LAUNCHER_BROKEN_BRANDS: frozenset[str] = frozenset({"Subaru"})
+
+
+def should_skip_catalog(brand: str | None) -> bool:
+    """True when partslink24's own catalogue launcher is broken for this
+    brand, so the catalogue leg cannot succeed and must be skipped.
+
+    A function rather than an inline `brand in LAUNCHER_BROKEN_BRANDS`
+    check, so the battery can exercise the DECISION rather than merely
+    grep for the constant. A source-inspection check cannot tell
+    `if brand in LAUNCHER_BROKEN_BRANDS:` from `if False:` — both leave
+    the name in the file — and a break test proved exactly that gap on
+    2026-09-09."""
+    return bool(brand) and brand in LAUNCHER_BROKEN_BRANDS
+
+
 MOTORRAD_SIBLING: dict[str, str] = {
     "BMW": "BMW Motorrad",
 }
@@ -1290,13 +1328,19 @@ def _find_usable_box(boxes, timeout_ms: int):
     name="mode", name="upds" on the Nissan frame page), and a broad
     alternative here is input[name*="vin" i], with no maxlength guard.
 
-    Suspected cause of Subaru's "VIN box not visible", which survived
-    adding input#direct_entry[maxlength="17"] to the list: the selector
-    matched, but .first had already locked onto something else. Not proven
-    against a live DOM — the failure dump is the app shell captured after
-    the fact — but scanning for a usable box is correct regardless of
-    whether that was the cause, and strictly more robust than trusting
-    document order.
+    This was FIRST written as the suspected cause of Subaru's "VIN box not
+    visible" and that guess was WRONG — Subaru's real fault is
+    LAUNCHER_BROKEN_BRANDS, an upstream error page with no VIN box at all.
+    The diagnostic count in the failure message is what disproved it: the
+    log said "(1 matched)", and shadowing needs at least two.
+
+    It is kept because it is correct on its own terms, not because it
+    fixed Subaru. Real evidence it is needed: the loaded Subaru catalogue
+    carries TWO matching inputs, and the one FIRST in document order is
+    a Chassis-number box inside a closed MuiDialog 80,000 characters
+    ahead of the real "Direct entry" field. Any SPA shipping a VIN-search
+    dialog has that shape, so .first was a live hazard on more than one
+    estate — just not the one that led us here.
 
     Polls rather than snapshotting, so a box that has not rendered yet is
     still waited for exactly as before. Returns the Locator, or None.
@@ -1351,19 +1395,18 @@ def submit_vin(page: Page, vin: str, *, source: str) -> tuple[bool, str | None]:
         'input[placeholder*="SEARCH VIN" i], '
         'input[placeholder*="VIN" i], '
         'input[placeholder*="FIN" i], '
-        # LEGACY FRAME UI — no placeholder at all, so the matches above
-        # find nothing and the leg fails "VIN box not visible" after the
-        # full 10s. Two id shapes observed on real pages:
-        #   Subaru catalogue     <input id="direct_entry" maxlength="17">
-        #   Nissan legacy frames <input id="vin" name="vin" maxlength="17">
-        # Both carry maxlength="17", which is the VIN length and is what
-        # makes these specific rather than a blanket text-input match.
+        # LEGACY FRAME UI — no placeholder, so the matches above miss it.
+        # Observed on the Nissan legacy frame page:
+        #   <input id="vin" name="vin" maxlength="17">
+        # maxlength="17" is the VIN length and is what makes this specific
+        # rather than a blanket text-input match.
         #
-        # Found 2026-09-09: Subaru lookups were succeeding only via the
-        # DASHBOARD fallback, burning 11s on a catalogue leg that could
-        # never work, and depending entirely on that fallback continuing
-        # to exist. K1X came back correct, so nothing was visibly wrong.
-        'input#direct_entry[maxlength="17"], '
+        # An input#direct_entry[maxlength="17"] entry was added here on
+        # 2026-09-09 and REMOVED the same day. It targeted the Subaru
+        # catalogue, but that id exists only in the static app shell of
+        # partslink24's p5 ERROR page — never in a working catalogue. It
+        # matched nothing useful and pointed the next reader at a dead
+        # element. Subaru's real problem is SUBARU_LAUNCH_BROKEN below.
         'input#vin[maxlength="17"], '
         'input[name="vin"][maxlength="17"], '
         'input[name*="vin" i], '
@@ -3507,13 +3550,24 @@ def lookup_vin(page: Page, row: LookupRow, debug: bool = False,
 
     if brand and brand in BRAND_CATALOG_SERVICE:
         log(f"looking up {row.vin}  {explanation}")
-        ok, err = _try_catalog(page, row.vin, brand, result, debug)
+        if should_skip_catalog(brand):
+            # partslink24's own launcher is broken for this brand, so the
+            # catalogue leg CANNOT work — skip it rather than burn ~11s
+            # proving that again, and go straight to the dashboard.
+            log(f"skipping {brand} catalog (launcher broken upstream); "
+                f"going straight to the dashboard")
+            ok, err = False, f"{brand} catalog launcher broken upstream"
+            catalog_error = err
+            last_leg_error = err
+        else:
+            ok, err = _try_catalog(page, row.vin, brand, result, debug)
         if ok:
             result.via = "catalog"
             return result
-        catalog_error = err
-        last_leg_error = err
-        log(f"catalog attempt failed: {err}")
+        if not should_skip_catalog(brand):
+            catalog_error = err
+            last_leg_error = err
+            log(f"catalog attempt failed: {err}")
 
         # Commercial-sibling retry: for a Mercedes commercial vehicle the
         # routed catalogue (Vans or Trucks) may be wrong because the
