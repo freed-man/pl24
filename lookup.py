@@ -1306,6 +1306,21 @@ def submit_vin(page: Page, vin: str, *, source: str) -> tuple[bool, str | None]:
         'input[placeholder*="SEARCH VIN" i], '
         'input[placeholder*="VIN" i], '
         'input[placeholder*="FIN" i], '
+        # LEGACY FRAME UI — no placeholder at all, so the matches above
+        # find nothing and the leg fails "VIN box not visible" after the
+        # full 10s. Two id shapes observed on real pages:
+        #   Subaru catalogue     <input id="direct_entry" maxlength="17">
+        #   Nissan legacy frames <input id="vin" name="vin" maxlength="17">
+        # Both carry maxlength="17", which is the VIN length and is what
+        # makes these specific rather than a blanket text-input match.
+        #
+        # Found 2026-09-09: Subaru lookups were succeeding only via the
+        # DASHBOARD fallback, burning 11s on a catalogue leg that could
+        # never work, and depending entirely on that fallback continuing
+        # to exist. K1X came back correct, so nothing was visibly wrong.
+        'input#direct_entry[maxlength="17"], '
+        'input#vin[maxlength="17"], '
+        'input[name="vin"][maxlength="17"], '
         'input[name*="vin" i], '
         'input[name*="fin" i]'
     ).first
