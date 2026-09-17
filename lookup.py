@@ -216,6 +216,7 @@ MAKE_TO_BRAND: dict[str, str] = {
     "skoda":          "Škoda",
     "škoda":          "Škoda",
     "smart":          "smart",
+    "subaru":         "Subaru",
     "suzuki":         "Suzuki",
     "toyota":         "Toyota",
     "vauxhall":       "Vauxhall",
@@ -399,6 +400,14 @@ BRAND_CATALOG_SERVICE: dict[str, str] = {
     "Peugeot": "peugeot_parts",
     "Polestar": "polestar_parts",
     "Porsche": "porsche_parts",
+    # Added 2026-09-09: partslink24 grew from 54 catalogues to 55 and
+    # Subaru was the new one, found by diffing the home grid against these
+    # maps. Service id taken from the LIVE catalogue URL
+    # (.../pl24-app/subaru_parts/0/0), not guessed from the logo slug —
+    # that guess is wrong for Opel (psa_opel_parts) and Volkswagen
+    # (vw_parts). STABILITY-ONLY: the row shape below is unverified
+    # against a dealer.
+    "Subaru": "subaru_parts",
     "Porsche Classic": "porscheclassic_parts",
     "Renault": "renault_parts",
     "SEAT": "seat_parts",
@@ -2106,8 +2115,44 @@ def _handle_catalog_candidates(page: Page) -> bool:
 # rollouts and rollbacks all mean the older markup can reappear, and the
 # login app (pl24-login-ui) still used the hyphenated form on the same
 # day, verified by its selectors continuing to work.
-EQUIPMENT_PANEL_SEL = ('[data-test-id="vinfoEquipment"], '
-                       '[data-testid="vinfoEquipment"]')
+# Every COLLAPSED data panel worth opening, in the order they are tried.
+# MUI unmounts a collapsed accordion's children, so these rows are ABSENT
+# from the DOM rather than hidden, and no regex or timeout reaches them —
+# the panel has to be clicked. The inventory below is not a guess: it is
+# every panel id observed across the real dumps, and it varies far more by
+# estate than the original single "vinfoEquipment" suggested.
+#
+#   vinfoEquipment            Renault, Dacia, Citroen, Peugeot, Vauxhall/Opel
+#                             — CONFIRMED to hold the paint code (OV369,
+#                             OVDQH, OVKQM, KTV, KTA all came from here)
+#   prNr                      Porsche, VW — VW-group PR number list
+#   vinfoStandardEquipment    BMW
+#   vinfoOptionalEquipment    BMW
+#   vinfoLiquidCapacities     BMW
+#
+# ORDER MATTERS ONLY FOR COST, not correctness: whichever panel holds the
+# code, opening the others first just costs clicks. vinfoEquipment is
+# first because it is the only one ever proven to hold a code.
+#
+# qrCode IS DELIBERATELY EXCLUDED. It holds a single base64 PNG — 265KB on
+# the Porsche page, 87% of that whole dump — which would bloat every
+# artifact, slow collect_all_text, and cannot contain a paint code.
+EXPANDABLE_PANEL_IDS = (
+    "vinfoEquipment",
+    "prNr",
+    "vinfoStandardEquipment",
+    "vinfoOptionalEquipment",
+    "vinfoLiquidCapacities",
+)
+
+
+def _both_testid_any(ids: tuple[str, ...]) -> str:
+    """CSS selector-list matching any of `ids` under EITHER test-id
+    spelling (see _both_testid for why both)."""
+    return ", ".join(f'[data-test-id="{i}"], [data-testid="{i}"]' for i in ids)
+
+
+EQUIPMENT_PANEL_SEL = _both_testid("vinfoEquipment")
 EQUIPMENT_ROW_SEL = '[data-test-id="row"], [data-testid="row"]'
 
 
@@ -2131,22 +2176,32 @@ def _expand_equipment_panel(page: Page) -> bool:
         never to an exception.
 
     Returns True if the panel was clicked open, False otherwise."""
-    try:
-        panel = page.locator(EQUIPMENT_PANEL_SEL).first
-        if panel.count() == 0:
-            return False
-        btn = panel.locator("button").first
-        if btn.get_attribute("aria-expanded") == "true":
-            return False          # already open; nothing to do
-        btn.click(timeout=3_000)
-        # The accordion animates (measured ~1.3-1.7s transition-duration on
-        # the two real pages). Wait for a row to actually mount rather than
-        # sleeping a guessed interval.
-        panel.locator(EQUIPMENT_ROW_SEL).first.wait_for(
-            state="attached", timeout=5_000)
-        return True
-    except Exception:
-        return False
+    opened = 0
+    for panel_id in EXPANDABLE_PANEL_IDS:
+        try:
+            panel = page.locator(_both_testid(panel_id)).first
+            if panel.count() == 0:
+                continue                      # this estate has no such panel
+            btn = panel.locator("button").first
+            if btn.get_attribute("aria-expanded") == "true":
+                continue                      # already open
+            btn.click(timeout=3_000)
+            # The accordion animates (measured 1317ms on the Dacia dump and
+            # 1702ms on the Renault one). Wait for content to MOUNT rather
+            # than sleeping a guessed interval. Two shapes are accepted: a
+            # data-test-id="row" table (Renault family) and a plain
+            # MuiAccordionDetails body (the PR list has no row ids).
+            try:
+                panel.locator(EQUIPMENT_ROW_SEL).first.wait_for(
+                    state="attached", timeout=5_000)
+            except Exception:
+                panel.locator(".MuiAccordionDetails-root").first.wait_for(
+                    state="attached", timeout=2_000)
+            opened += 1
+        except Exception:
+            continue          # a panel that will not open must not stop the
+                              # others, and must never raise into the caller
+    return opened > 0
 
 
 def _handle_model_picker(page: Page) -> bool:
@@ -2465,6 +2520,23 @@ def _extract_hyundai_kia_colour(text: str) -> tuple[str, str]:
         return "", ""
     if _value_is_field_label(val):
         return "", ""          # captured the next row's label, not a colour
+    # SUBARU splits one cell into code AND name. partslink24 renders
+    #     Exterior color
+    #     K1X - CRYSTAL WHITE PEARL
+    # (real page, XV JF1GP7KA3GG170166, 2026-09-09). Without this the whole
+    # cell fails the "is it a code" test on its space, is returned as a
+    # NAME, and the code is LOST inside it: "K1X - Crystal White Pearl" as
+    # the colour name with nothing in the code slot. The Peugeot 107 defect
+    # (KTA - PAINT DARK GREY MICA) in a new estate.
+    #
+    # Safe for Hyundai/Kia, whose real values contain no " - ": "TOMOTO
+    # RED", "CREAMY WHITE [TCW]", "JD HP / TRICOAT WHITE PEARL". The
+    # separator must be a SPACED hyphen so a hyphenated name (BLUE-GREY)
+    # is not split. The interior guard above still runs first, so
+    # "Interior color / J20 - OFF BLACK" is rejected before reaching here.
+    m_split = re.match(r"^([A-Z0-9]{2,8}) - (\S.*)$", val)
+    if m_split:
+        return m_split.group(1), m_split.group(2).strip()
     is_name = (" " in val) or (len(val) >= 4 and val.replace(" ", "").isalpha())
     if not is_name:
         return "", ""
