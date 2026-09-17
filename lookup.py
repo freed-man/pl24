@@ -1278,6 +1278,51 @@ def _wait_for_editable(box, timeout_ms: int) -> bool:
     return False
 
 
+def _find_usable_box(boxes, timeout_ms: int):
+    """First VISIBLE and EDITABLE match, polled while the page loads.
+
+    NOT boxes.first. Playwright resolves .first to the first match in
+    DOCUMENT order across the WHOLE selector list, not the first
+    alternative that matches — so one hidden input matching a broad
+    alternative outranks the real box, and wait_for(state="visible") then
+    times out on an element that will never be visible. The legacy frame
+    pages carry exactly such inputs (<input type="hidden" name="lang">,
+    name="mode", name="upds" on the Nissan frame page), and a broad
+    alternative here is input[name*="vin" i], with no maxlength guard.
+
+    Suspected cause of Subaru's "VIN box not visible", which survived
+    adding input#direct_entry[maxlength="17"] to the list: the selector
+    matched, but .first had already locked onto something else. Not proven
+    against a live DOM — the failure dump is the app shell captured after
+    the fact — but scanning for a usable box is correct regardless of
+    whether that was the cause, and strictly more robust than trusting
+    document order.
+
+    Polls rather than snapshotting, so a box that has not rendered yet is
+    still waited for exactly as before. Returns the Locator, or None.
+    """
+    waited = 0
+    interval = 250
+    while waited < timeout_ms:
+        try:
+            n = min(boxes.count(), 12)      # cap: pathological pages only
+        except Exception:
+            n = 0
+        for i in range(n):
+            cand = boxes.nth(i)
+            try:
+                if cand.is_visible() and cand.is_editable():
+                    return cand
+            except Exception:
+                continue                    # detached mid-scan; try the next
+        try:
+            boxes.page.wait_for_timeout(interval)
+        except Exception:
+            return None
+        waited += interval
+    return None
+
+
 def submit_vin(page: Page, vin: str, *, source: str) -> tuple[bool, str | None]:
     """Find the VIN input on the page and submit `vin`.
 
@@ -1300,7 +1345,7 @@ def submit_vin(page: Page, vin: str, *, source: str) -> tuple[bool, str | None]:
     box_name = "SEARCH VIN box" if source == "dashboard" else "VIN box"
     editable_suffix = ("never became editable" if source == "dashboard"
                        else "visible but never became editable")
-    box = page.locator(
+    boxes = page.locator(
         'input[placeholder*="Direct entry" i], '
         'input[placeholder*="Direkteingabe" i], '
         'input[placeholder*="SEARCH VIN" i], '
@@ -1323,13 +1368,19 @@ def submit_vin(page: Page, vin: str, *, source: str) -> tuple[bool, str | None]:
         'input[name="vin"][maxlength="17"], '
         'input[name*="vin" i], '
         'input[name*="fin" i]'
-    ).first
-    try:
-        box.wait_for(state="visible", timeout=10_000)
-    except PlaywrightTimeoutError:
-        return False, f"{box_name} not visible"
-    if not _wait_for_editable(box, timeout_ms=10_000):
-        return False, f"{box_name} {editable_suffix}"
+    )
+    box = _find_usable_box(boxes, timeout_ms=10_000)
+    if box is None:
+        # The match COUNT is in the message on purpose: it turns the next
+        # occurrence into a diagnosis. 0 means the selector list misses
+        # this page's box entirely (add its shape). >0 means the box was
+        # found but never became visible+editable — a hidden or disabled
+        # input, or a page that never finished rendering.
+        try:
+            matched = boxes.count()
+        except Exception:
+            matched = -1
+        return False, f"{box_name} not visible ({matched} matched)"
     try:
         box.fill(vin, timeout=5_000)
         box.press("Enter")
