@@ -1607,20 +1607,94 @@ PSA_BCODE_COLOUR_RE = re.compile(
 #                             Two cars, two makes, both hatchbacks; the
 #                             row shape is unconfirmed on Renault vans.
 #
-#   STABILITY-ONLY (expectations never checked against a dealer)
-#     Mercedes (9744, 441), Mini (851), Vauxhall legacy (4CU),
-#     VW Commercial (M7P), Ford (name-only), Hyundai (name-only),
-#     Volvo (490), Fiat family (679), Jaguar.
+#     PSA (non-B0)
+#               2026-08    BODY COLOUR / "<code> - <name> PAINT" DOES
+#                          carry the code: Citroen C3 KTV, Peugeot 107
+#                          KTA. This SPLIT the old blanket "PSA not
+#                          extractable", which was only ever true of the
+#                          B0-family shape above.
+#     Mercedes  2026-09-18 WDB2010242F790734 -> 441, page "Paint Code /
+#                          441 (IMPALA - METALLIC)". Dealer 441, verbatim,
+#                          no prefix. Reached via the MODEL PICKER, so it
+#                          also validates that path end to end.
+#     Mini      2026-09-18 WMW12DJ0302V45468 -> C6B "Melting Silver III".
+#                          Dealer C6B. A DIFFERENT SHAPE from the 851 this
+#                          list used to assume: Mini has at least two code
+#                          formats, both via the paren pattern.
+#     Volvo     2026-09-18 YV1XZACVCL2301853 -> 727 "Pebble Grey". Dealer
+#                          727 — the TRIMMED form, confirming
+#                          _normalise_code: the page shows 72700 and the
+#                          5-digit padding is not the supplier code.
+#                          TWO PAGE SHAPES, both live (see below).
+#     Jaguar    2026-09-18 SADCA2AN0NA703555 -> JBC2410 "Portofino Blue".
+#                          Dealer JBC2410, verbatim.
+#     Fiat      2026-09-18 ZFA19900005304093 -> 612 "Seda Metaliza".
+#                          Dealer 612 but names it "Light Gray Metallic":
+#                          code confirmed, NAME diverges. We return the
+#                          page verbatim by design; any remap is
+#                          coloureg-side.
+#     Vauxhall  2026-09-18 W0L0XCE7574398236 -> 4XU, no name, via
+#     (legacy)             catalog:legacy. Dealer 4XU. Also exercises the
+#                          legacy-sibling chain end to end.
+#     VW Comm.  2026-09-18 WV4ZZZTW8SK053806, "2E / 9F0". CORROBORATED,
+#                          not dealer-checked: Ezyvin gives "Clear white
+#                          (2E)" and an independent paint source gives
+#                          L9F0/9F0. Same compound row as the Golf.
+#                          TRAP: 9F0 ALSO appears on that car's build
+#                          sheet as an unrelated PR option code ("without
+#                          sound combination for rotating emergency
+#                          light"). VW PR numbers and paint codes share
+#                          the 3-char space — read the FIELD, not the
+#                          value.
+#     Subaru    2026-09-18 JF1GP7KA3GG170166 -> K1X "Crystal White
+#                          Pearl". Not dealer-checked; corroborated by
+#                          the dataset AND by structural elimination of
+#                          the alternative (C05 absent from all 1,032
+#                          Suzuki rows, appears only under other marques).
 #
-#   NOTE VW Commercial is NOT cleared by the VW/Audi entry above, for
-#   the same reason Volvo is not cleared by Nissan: verification
-#   attaches to estates, not to shapes or brand families. If its pages
-#   carry the same compound row, one Transporter/Caddy check clears it.
+#   VERIFIED NAME-ONLY (partslink24 publishes a name and no code)
+#     Ford      2026-09-18 Three cars: Mustang "Cyber Orange 3C", two
+#                          Transits "Magnetic"/"Frozen White". The bare
+#                          names on the Transits confirm 3C is finish
+#                          text, not an appended code. Do NOT strip it.
+#     Hyundai   2026-09-18 TMAJ2811LKJ747952 -> "Polar White". The dealer
+#                          DOES issue a code (PYW) but PYW occurs ZERO
+#                          times on the page. So nothing is being
+#                          dropped; PYW is dealer/dataset-only.
 #
-#   NOTE Volvo shares the "Exterior colour" pattern with Nissan but is
-#   NOT thereby verified: the pattern is confirmed correct for NISSAN's
-#   page, and a different estate can label a different field the same
-#   way. That is precisely how Suzuki went wrong.
+#   VERIFIED NOT EXTRACTABLE
+#     PSA B0-family  2026-08-07  (above)
+#     Vauxhall/Opel  2026-09     Mokka VXKUSHPW7SW021171: 15.7KB of
+#     (modern)                   equipment rows, no code, only "painted
+#                                in body colour" vocabulary.
+#     Porsche        2026-09-18  Macan WP1ZZZXA1SL156688: compound row
+#                                reads "89 /" with the post-slash cell
+#                                EMPTY. The prNr accordion was opened
+#                                manually and holds 49 VW-group OPTION
+#                                codes, none of them paint.
+#
+#   STABILITY-ONLY — EMPTY as of 2026-09-18. Every estate above has
+#   external confirmation. There is no longer a "probably fine" tier: if
+#   an estate misbehaves, something CHANGED.
+#
+#   NOTE verification attaches to ESTATES, not to shapes or brand
+#   families. VW Commercial was not cleared by VW/Audi, and Volvo was not
+#   cleared by Nissan despite sharing the "Exterior colour" label — a
+#   different estate can label a different field the same way. That is
+#   precisely how Suzuki went wrong. A NEW catalogue therefore starts as
+#   stability-only even if its shape is already known.
+#
+#   VOLVO HAS TWO PAGE SHAPES, and only one was documented until
+#   2026-09-18 — found by a differential audit, where an independent
+#   extractor written from this ledger's prose missed the other:
+#     JOINED     "Exterior colour" / "490 Passion Red"  — code and name
+#                in ONE cell, 3-digit code then the name. Handled by
+#                PAINT_CODE_PATTERNS[2] + PAINT_DESCRIPTION_PATTERNS[4].
+#     SEPARATED  "Exterior color" / "72700", then "Exterior color" /
+#                "PEBBLE GREY" — TWO rows with the SAME label, 5-digit
+#                padded code in one and the name in the other. This is
+#                the shape the live 2026-09-18 page used.
+#   Both are current; do not "simplify" either away.
 # ---------------------------------------------------------------------
 # EXTRACTION, NEVER INFERENCE — the standing rule for this list, written
 # 2026-08-07 after three PSA rules shipped wrong in one day. A paint code

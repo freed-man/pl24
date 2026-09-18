@@ -255,6 +255,39 @@ client timeout and treat a pl24 timeout as "no paint from pl24".
 
 ---
 
+### Volvo has TWO page shapes — check which one you are looking at
+
+Both are current. A pattern change that fixes one can silently break the
+other, and only one was documented until 2026-09-18 (found by a
+differential audit: an independent extractor written from the ledger's
+prose missed the second).
+
+**JOINED** — code and name in one cell:
+
+    Exterior colour    490 Passion Red
+
+3-digit code, whitespace, then the name. `PAINT_CODE_PATTERNS[2]` takes
+the code; `PAINT_DESCRIPTION_PATTERNS[4]` takes the name. That pattern
+requires a TAB or SPACE between code and name specifically so it cannot
+span a newline — without it, Lexus/Toyota's `Exterior color / 085 /
+Interior color` matched and returned the next field's LABEL as the colour.
+
+**SEPARATED** — two rows with the SAME label:
+
+    Exterior color     72700
+    Exterior color     PEBBLE GREY
+
+The 5-digit padded code in one, the name in the other. `_normalise_code`
+trims `72700` to `727`, and the dealer confirmed the TRIMMED form
+(`YV1XZACVCL2301853`, 2026-09-18), so the padding genuinely is not the
+supplier code. This is the shape the live page used.
+
+**If a Volvo returns `72700` raw**, `_normalise_code` has been lost. **If
+it returns a name with no code**, the joined-shape code pattern has been
+broken. Both VINs are in the lockstep test list in `NOTES.md`.
+
+---
+
 ### `skipping Subaru catalog (launcher broken upstream)` → `via=dashboard`
 
 **Normal and expected, not a fault.** Subaru is served by the legacy p5
