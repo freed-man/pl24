@@ -255,6 +255,61 @@ client timeout and treat a pl24 timeout as "no paint from pl24".
 
 ---
 
+### `skipping Subaru catalog (launcher broken upstream)` → `via=dashboard`
+
+**Normal and expected, not a fault.** Subaru is served by the legacy p5
+platform and `launchCatalog.do?service=subaru_parts` redirects into it with
+the session placeholder UNSUBSTITUTED — `?session=${pl24SessionId}` appears
+literally — so p5 renders `Invalid serviceName "subaru_parts?session=
+${pl24SessionId}"`. There is no VIN box on an error page, so no selector
+can help. Clicking the Subaru tile on the manufacturer grid works, because
+the grid's own JS supplies the session; pl24 cannot run that JS.
+
+Skipping the doomed leg saves ~11s. The dashboard returns the code
+correctly (`JF1GP7KA3GG170166` → `K1X` / Crystal White Pearl).
+
+**If this line STOPS appearing, or `via` becomes `catalog`:** partslink24
+fixed the launcher. Remove `Subaru` from `LAUNCHER_BROKEN_BRANDS` in
+`lookup.py` — a stale entry silently pins the brand to the slower leg
+forever. Test: does `launchCatalog.do?service=subaru_parts` reach a VIN
+box?
+
+---
+
+### `VIN box not visible (N matched)` — **read N**
+
+The count is the diagnosis, and it is there because a wrong theory was
+chased for two rounds without it.
+
+- **`(0 matched)`** — the selector list misses that page's VIN box
+  entirely. Get the page and add its shape to `submit_vin`.
+- **`(1+ matched)`** — the box was FOUND but never became visible and
+  editable. Causes seen: a hidden input, an input inside a CLOSED dialog,
+  or a page that is not a catalogue at all (the Subaru p5 error page
+  matched exactly 1 — its static app shell).
+
+The box is chosen by being visible AND editable, not by document order:
+`page.locator("<list>").first` resolves to the first match across the
+whole selector list, and on the loaded Subaru catalogue a Chassis-number
+input inside a closed MuiDialog sat 80,000 characters ahead of the real
+"Direct entry" field. Any SPA with a VIN-search dialog has that shape.
+
+---
+
+### `saved squeeze_prompt_<account>.*` — multi-slot tagging
+
+Expected with `PL24_ACCOUNTS` set. Both pool slots log in CONCURRENTLY at
+startup, so an untagged filename would let two threads write one `.html`
+and one `.png` at the same instant — producing a MIXED artifact, slot A's
+HTML beside slot B's screenshot. The tag also answers the first question
+you would ask of such a dump: which account got squeezed?
+
+An **untagged** `squeeze_prompt.*` means the CLI, which has no bound
+account. That is correct, not a bug. The `_debug` cleaner exempts these by
+PREFIX, so tagged files survive a run.
+
+---
+
 ### partslink24 test-id attribute rename (2026-07-31 build)
 
 The catalogue app renamed `data-test-id` → `data-testid` (no hyphen). A

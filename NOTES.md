@@ -71,7 +71,7 @@ python lookup.py --vin WV1ZZZ... --make Volkswagen --category N1
 | `--vin VIN --make MAKE` | Look up a single VIN instead of `lookups.txt` |
 | `--category N1` | Category for the single-VIN mode (vans, etc.) |
 | `--fresh` | Ignore the saved session and log in clean (was: deleting `storage_state.json` by hand) |
-| `--debug` | Dump artifacts to `_debug/<vin>.{html,png,txt}` **on failure** (`_debug/` is wiped at the start of each run, except `squeeze_prompt.*`). Headless by default — add `--headed` to watch. |
+| `--debug` | Dump artifacts to `_debug/<vin>.{html,png,txt}` **on failure** (`_debug/` is wiped at the start of each run, except anything starting `squeeze_prompt` — matched by PREFIX, since multi-slot dumps carry an account tag like `squeeze_prompt_admin.html`). Headless by default — add `--headed` to watch. |
 | `--dump` | Dump on **every** result incl. successes — for inspecting a page that returns a wrong/blank value. Headless by default — add `--headed` to watch. (Renamed from `--dump-always`; no longer forces a window.) |
 | `--skip-brand-check` | **No-op**, accepted only for compatibility. The brand-list verification was removed on 2026-08-01: the 2026-07 partslink24 rebuild replaced the home grid's `<a id="<service>_lc">` anchors with a React component exposing titles and logo slugs but no service ids, so there is nothing left to scrape. `service.py` still passes the flag, hence the parameter remains. |
 | `--no-fallback` | Disable the dashboard SEARCH VIN fallback |
@@ -250,6 +250,43 @@ per the operating constraint):
      "Exterior color / Paint Code" extraction
    - `WVWZZZAUZFW002714` (passenger VW) → `A7N / catalog` — plain first-leg
      regression
+
+   Added 2026-09-18. The list above predated every mechanism that depends
+   on a CLICK AND A MOUNT, which is exactly what a new browser engine's
+   timing disturbs — so validating without these would miss the most
+   timing-sensitive code in the file:
+   - `VF1RJA00773682232` (Renault Clio) → `OV369 / catalog` — the
+     Equipment-accordion expand inside the wait loop. **Also check the
+     TIMING**: ~2s is healthy, ~11s means the panel is not opening and the
+     existing needle is never firing
+   - `UU1DJF00671679079` (Dacia Sandero) → `OVKQM / catalog` — same expand,
+     second make, and a digit-free code that only survives
+     `_is_valid_code` via the trusted-context exemption
+   - `JF1GP7KA3GG170166` (Subaru XV) → `K1X / dashboard` — the
+     launcher-broken skip. `via` MUST be `dashboard`; if it is `catalog`,
+     partslink24 fixed their launcher and the `LAUNCHER_BROKEN_BRANDS`
+     entry should come out
+   - `WP1ZZZXA1SL156688` (Porsche Macan) → **nothing**, `paint_data_missing`
+     — the verified not-extractable case. Any code here is a regression,
+     and `BLK` specifically means the label-anchor fix has been lost
+   - `WF0RXXTA5RSP48614` (Ford Transit Custom) → `Magnetic`, `name_only`
+     — legacy frame UI plus the commercial sibling chain
+   - `WV4ZZZTW8SK053806` (VW Transporter) → `9F0 / catalog` — compound row
+     on a third estate
+   - `WMW12DJ0302V45468` (Mini) → `C6B / catalog` — the paren pattern, and
+     a different code shape from the `851` this list used to assume
+   - `JSAAZCA3S00513675` (Suzuki) → `ZMW / catalog` — the two-row
+     body-vs-trim selection. `C05` here is the 2026-08-08 regression
+   - `YV1XZACVCL2301853` (Volvo XC40) → `727 / catalog` — `_normalise_code`
+     trimming the page's `72700`. `72700` returned raw means the transform
+     has been lost
+   - `SADCA2AN0NA703555` (Jaguar) → `JBC2410 / catalog`
+   - `ZFA19900005304093` (Fiat) → `612 / catalog`
+   - `W0L0XCE7574398236` (Vauxhall) → `4XU / catalog:legacy`
+   - `TMAJ2811LKJ747952` (Hyundai) → `Polar White`, `name_only`
+   - `W1K1183512N150661` (Mercedes-AMG CLA) → `144 / catalog` — an AMG
+     routes and extracts like any Mercedes once the make string reaches us
+
    Any regression → roll local back (`pip install playwright==<old>` +
    `playwright install chromium`), stop, and investigate with the dumps
    before going further.
