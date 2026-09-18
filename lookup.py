@@ -2337,12 +2337,6 @@ EXPANDABLE_PANEL_IDS = (
 )
 
 
-def _both_testid_any(ids: tuple[str, ...]) -> str:
-    """CSS selector-list matching any of `ids` under EITHER test-id
-    spelling (see _both_testid for why both)."""
-    return ", ".join(f'[data-test-id="{i}"], [data-testid="{i}"]' for i in ids)
-
-
 EQUIPMENT_PANEL_SEL = _both_testid("vinfoEquipment")
 EQUIPMENT_ROW_SEL = '[data-test-id="row"], [data-testid="row"]'
 
