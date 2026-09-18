@@ -1092,7 +1092,15 @@ def _extract_login_error(page: Page) -> str:
     four of its return paths pass one length check — the raw/wrapper shape
     used by extract_paint_description, rather than a slice at each site
     that a fifth return path could later miss."""
-    msg = _extract_login_error_raw(page)
+    # Never raises. This runs to BUILD the "login failed: ..." message, so
+    # an exception here would replace a diagnosable login failure with an
+    # opaque one — and on a dead page every locator call raises. Same rule
+    # as dump_debug: code on the failure path must not fail. Found by
+    # failure injection 2026-09-18.
+    try:
+        msg = _extract_login_error_raw(page)
+    except Exception:
+        return "could not read the login error (page unavailable)"
     if len(msg) > _LOGIN_ERROR_MAX:
         return msg[:_LOGIN_ERROR_MAX - 3] + "..."
     return msg
@@ -3867,6 +3875,28 @@ def lookup_vin_with_retry(page: Page, row: LookupRow, debug: bool,
 
 
 def dump_debug(page: Page, vin: str, text: str | None = None) -> None:
+    """Write debug artifacts. NEVER raises — see _dump_debug_inner.
+
+    A diagnostic that throws destroys the thing it exists to explain. Every
+    caller runs it on a path where the outcome is ALREADY decided
+    ("paint code not found", "VIN box not visible"), so an exception here
+    would replace a meaningful error with a meaningless one — and, because
+    the pool treats an exception as a crashed session, would trigger a
+    needless rebuild-and-retry of a lookup that had already finished.
+
+    The two sibling dumpers, _dump_squeeze_prompt and _dump_login_failure,
+    have always swallowed. This one did not: its INNER steps were each
+    guarded, but DEBUG_DIR.mkdir, page.frames and the enumerate loop sat
+    outside them, so a dead page still raised. Found by failure injection
+    2026-09-18 — feeding a page whose every call raises.
+    """
+    try:
+        _dump_debug_inner(page, vin, text)
+    except Exception:
+        pass
+
+
+def _dump_debug_inner(page: Page, vin: str, text: str | None = None) -> None:
     DEBUG_DIR.mkdir(exist_ok=True)
     base = DEBUG_DIR / vin
     try:
@@ -3903,7 +3933,14 @@ def dump_debug(page: Page, vin: str, text: str | None = None) -> None:
             )
         except Exception:
             pass
-    for i, fr in enumerate(page.frames):
+    # page.frames itself can raise on a dead page — it is an attribute
+    # access that crosses to the browser. Guarded for the same reason the
+    # whole function is: see the wrapper note below.
+    try:
+        frames = list(page.frames)
+    except Exception:
+        frames = []
+    for i, fr in enumerate(frames):
         # frames[0] IS the main frame, so its content duplicates the
         # <vin>.html written above byte for byte. Skip it; keep every child
         # frame, which are the ones carrying real extra signal (the PSA
