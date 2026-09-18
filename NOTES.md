@@ -277,9 +277,14 @@ per the operating constraint):
      a different code shape from the `851` this list used to assume
    - `JSAAZCA3S00513675` (Suzuki) → `ZMW / catalog` — the two-row
      body-vs-trim selection. `C05` here is the 2026-08-08 regression
-   - `YV1XZACVCL2301853` (Volvo XC40) → `727 / catalog` — `_normalise_code`
-     trimming the page's `72700`. `72700` returned raw means the transform
-     has been lost
+   - `YV1XZACVCL2301853` (Volvo XC40) → `727 / catalog` — the SEPARATED
+     Volvo shape (two rows both labelled `Exterior color`, `72700` in one
+     and `PEBBLE GREY` in the other) plus `_normalise_code` trimming it.
+     `72700` returned raw means the transform has been lost. **Volvo has a
+     SECOND shape** — joined, `Exterior colour / 490 Passion Red` — which
+     no test VIN currently covers; if one turns up, add it, because a
+     pattern change fixing one shape can silently break the other
+     (see ERRORS.md)
    - `SADCA2AN0NA703555` (Jaguar) → `JBC2410 / catalog`
    - `ZFA19900005304093` (Fiat) → `612 / catalog`
    - `W0L0XCE7574398236` (Vauxhall) → `4XU / catalog:legacy`
