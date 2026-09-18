@@ -103,6 +103,38 @@ auto-clicks the first variant and continues — safe because all variants of a
 given VIN share the same paint code (confirmed; the sales-types differ only
 by market/parts-catalogue). See the "Model picker" note in `ERRORS.md`.
 
+## Test batteries — NOT in this repo
+
+Five battery files live in Roland's `etc/` folder (gitignored) and are the
+only automated tests this project has. **A session working on pl24 should
+ask for them if they have not been provided** — reading the repo alone
+gives no sign they exist, which is the one drawback of keeping them out.
+
+| file | covers |
+|---|---|
+| `pl24_invariants.py` | routing-map consistency, OUTCOMES reachability, pattern group counts, the in-code ledger's mechanical claims. 0.1s, needs nothing but an importable `playwright` |
+| `pl24_fuzz.py` | ReDoS sweeps, seeded fuzz, per-estate extraction anchors, credential redaction, failure-injection. ~8s, the slowest and the most thorough |
+| `pl24_metamorphic.py` | properties rather than examples — noise-invariance, CRLF/CR invariance, cross-estate contamination, purity |
+| `pl24_pool_harness.py` | `PoolWorker` for real: multi-slot parallelism, crash-rebuild-retry, abandonment, partial-startup teardown. **Run before changing `PL24_ACCOUNTS`** |
+| `pl24_http_harness.py` | the real FastAPI app through its real lifespan: auth, JSON contract, VIN validation over the wire, 502/504 paths, the leg budget. Needs `fastapi`, `httpx`, `uvicorn` |
+
+**RULE: all five green before any deploy.**
+
+**Run them against a FRESH CLONE, not your working copy.** On 2026-09-18 a
+deploy silently did not land — the files had been edited but not committed
+— and the only thing that caught it was `pl24_fuzz.py` failing against the
+clone with an error that could only come from the OLD code. A battery
+detecting stale code is the cheapest deploy check available, and it only
+works if the clone is fresh.
+
+They are deliberately kept OUT of the repo. They import the real functions
+from `lookup.py` rather than copies, so they cannot drift into testing a
+replica; committing them would make them part of the thing under test, and
+the temptation when one goes red would become "fix the battery" rather than
+"fix the code". They also encode the verification ledger's expected values,
+which is a record of what was checked against dealers — not a property of
+the deployed artifact.
+
 ## Deployed worker (Railway)
 
 Besides the CLI, `lookup.py`'s `Session` class is driven by `service.py`, a
