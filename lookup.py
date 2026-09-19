@@ -1613,6 +1613,20 @@ PSA_BCODE_COLOUR_RE = re.compile(
 #                          KTA. This SPLIT the old blanket "PSA not
 #                          extractable", which was only ever true of the
 #                          B0-family shape above.
+#                          THREE VALUE SHAPES seen, all on the same
+#                          BODY COLOUR row — the noise word PAINT moves:
+#                            trailing  KTV - BLACK PEARL PAINT
+#                            leading   KTA - PAINT DARK GREY MICA 1E0
+#                            MIDDLE    EKQ - PAINT - WICKED RED
+#                                      (Peugeot VF32AKFWA44973197,
+#                                      2026-09-19)
+#                          The third is why the name is tidied of
+#                          STRANDED separators at the choke point in
+#                          extract_paint_description: dropping PAINT from
+#                          the middle leaves the second dash behind, and
+#                          the customer was shown "- Wicked Red". Expect
+#                          a fourth arrangement eventually; the tidy is
+#                          written to survive one.
 #     Mercedes  2026-09-18 WDB2010242F790734 -> 441, page "Paint Code /
 #                          441 (IMPALA - METALLIC)". Dealer 441, verbatim,
 #                          no prefix. Reached via the MODEL PICKER, so it
