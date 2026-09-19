@@ -2977,6 +2977,27 @@ def extract_paint_description(text: str) -> str:
     # it, because there is no longer a site to forget.
     if _value_is_field_label(desc):
         return ""
+    # THIRD universal gate: tidy a separator left stranded by STRIPPING.
+    # The name is assembled by REMOVING tokens — the leading "<CODE> - ",
+    # the noise word PAINT, a trailing cross-reference code — and nothing
+    # cleaned up what removal left behind. Peugeot VF32AKFWA44973197
+    # renders
+    #     BODY COLOUR
+    #     EKQ - PAINT - WICKED RED
+    # so dropping PAINT leaves " -  - WICKED RED" and the customer was
+    # shown "- Wicked Red" (2026-09-19).
+    #
+    # Deliberately at the choke point and not in the PSA extractor: the
+    # defect is a property of stripping, not of PSA, and any future
+    # extractor that removes a token inherits it. Same reasoning as the
+    # two gates above — a guard applied at some sites and not others has
+    # now caused four bugs.
+    #
+    # Only LEADING and TRAILING separators go. Internal punctuation is
+    # part of real names: "Whisper + Black Onyx", "Jd Hp / Tricoat White
+    # Pearl", "Blue-Grey Metallic", "Schwarz Met.".
+    desc = re.sub(r"^[\s\-/,:]+|[\s\-/,:]+$", "", desc)
+    desc = re.sub(r"\s{2,}", " ", desc)
     return desc if _description_is_meaningful(desc) else ""
 
 
